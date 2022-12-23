@@ -105,8 +105,8 @@ class Commands(Enum):
     get_signal_info = b"GetIncomingSignalInfo", SingleCmd, IsInformational.true
     get_aspect_ratio = b"GetAspectRatio", SingleCmd, IsInformational.true
     get_masking_ratio = b"GetMaskingRatio", SingleCmd, IsInformational.true
-    get_temp = b"GetTemperatures", SingleCmd, IsInformational.true
-    get_mac = b"GetMacAddress", SingleCmd, IsInformational.true
+    get_temperature = b"GetTemperatures", Temperatures, IsInformational.true
+    get_macaddress = b"GetMacAddress", SingleCmd, IsInformational.true
 
     # enum_settings = b"EnumSettingsPages"
     # enum_configs = b"EnumConfigPages"

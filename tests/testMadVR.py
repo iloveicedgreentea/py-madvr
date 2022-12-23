@@ -17,13 +17,20 @@ class TestMenu(unittest.TestCase):
     def test__construct_command(self):
         """ensure it can construct a command"""
 
-        cmd, isin = madvr._construct_command("key_press, menu")
+        cmd, isin, _ = madvr._construct_command("key_press, menu")
 
         self.assertEqual(cmd, b'KeyPress MENU\r\n')
         self.assertEqual(isin, False)
 
+    def test_gettemp(self):
+        """Test informational command"""
+        cmd = madvr.send_command("get_temperature")
+        # TODO: make this a dict
+        self.assertIsInstance(cmd, list)
+        self.assertFalse("Error" in cmd)
+
     def test_menuopen(self):
-        """Verify menu opens and closes"""
+        """Functional test - menu opens and closes"""
 
         madvr.send_command("key_press, menu")
         time.sleep(1)

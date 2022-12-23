@@ -4,9 +4,10 @@ Implements the MadVR protocol
 
 import logging
 from typing import Final
+import re
 import time
 import socket
-from madvr.commands import ACKs, Footer, Commands, Enum, Connections
+from madvr.commands import ACKs, Footer, Commands, Enum, Connections, Temperatures
 
 class Madvr:
     """MadVR Control"""
@@ -107,7 +108,7 @@ class Madvr:
         Transform commands into their byte values from the string value
         """
         # split command into the base and the action like menu: left
-        self.logger.debug(raw_command)
+        self.logger.debug("raw_command: %s", raw_command)
         skip_val = False
         try:
             # key_press, menu
@@ -125,50 +126,68 @@ class Madvr:
         # construct the command with nested Enums
         command_name, val, is_info = Commands[command].value
         if not skip_val:
-            self.logger.debug("command_name: %s", command_name)
-            self.logger.debug("val: %s", val[value.lstrip(" ")].value)
-            self.logger.debug("is info: %s", is_info.value)
+            # self.logger.debug("command_name: %s", command_name)
+            # self.logger.debug("val: %s", val[value.lstrip(" ")].value)
+            # self.logger.debug("is info: %s", is_info.value)
             command_base: bytes = command_name + b" " + val[value.lstrip(" ")].value
             # Construct command based on required values
-            command: bytes = (
+            cmd: bytes = (
                 command_base + Footer.footer.value
             )
         else:
-            command: bytes = (
-                command + Footer.footer.value
+            cmd: bytes = (
+                command_name + Footer.footer.value
             )
-        self.logger.debug("command: %s", command)
+    
+        self.logger.debug("constructed command: %s", cmd)
 
-        return command, is_info.value
+        return cmd, is_info.value, val
 
     def send_command(self, command: str) -> str:
         """send a given command"""
 
-        cmd, is_info = self._construct_command(command)
+        cmd, is_info, enum_type = self._construct_command(command)
         if cmd is False:
             return "Command not found"
-
-        self.logger.debug("Sending command: %s", cmd)
-        self.logger.debug("Is informational %s", is_info)
 
         # Send the command
         self.client.send(cmd)
 
         # read ack which should be ok
-        ack_reply = self.client.recv(self.read_limit)
-        self.logger.debug(ack_reply)
-        if ack_reply != ACKs.reply.value:
-            self.logger.error(ack_reply)
-            return "Ack OK not received when sending command", False
-
+        try:
+            ack_reply = self.client.recv(self.read_limit)
+            if ack_reply != ACKs.reply.value:
+                self.logger.debug("trying to get ack again")
+                second_ack_reply = self.client.recv(self.read_limit)
+                self.logger.debug(second_ack_reply)
+                if ACKs.reply.value.decode() not in second_ack_reply.decode():
+                    self.logger.error("Ack OK not received when sending command: %s", ack_reply)
+                    return "Error: Ack OK not received when sending command"
+        except socket.timeout:
+            self.logger.error("Ack receipt timed out")
+            return "Error: timeout"
         if is_info:
-            # TODO: check if the response matches stuff in Notifications
             # read response
             res = self.client.recv(self.read_limit)
             self.logger.debug(res)
-            return res
+            # process the output
+            return self._process_info(res, enum_type)
 
         return "ok"
+
+    def _process_info(self, result: bytes, header: Enum) -> list:
+        #b'Temperatures 59 38 30 34\r\n'
+        if header == Temperatures:
+            self.logger.debug("Type is temp")
+            return self._process_temperatures(result)
+        
+        return ""
+        
+    def _process_temperatures(self, temp_string: bytes) -> list:
+        # look for things between "Temperature" and \r, using word boundaries
+        # TODO: construct a dict of each kind of sensor
+        # %gpu% %hdmiInput% “%cpu%” “%mainboard
+        return re.findall(r'\b\d+\b', temp_string.decode())
 
     def print_commands(self) -> str:
         """
