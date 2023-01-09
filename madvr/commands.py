@@ -16,8 +16,8 @@ class Footer(Enum):
 class Headers(Enum):
     temperature = b"Temperatures"
     activate_profile = b"ActivateProfile"
-    incoming_signal_info = b"IncomingSignalInfo"
-    outgoing_signal_info = b"OngoingSignalInfo"
+    incoming_signal = b"IncomingSignalInfo"
+    outgoing_signal = b"OngoingSignalInfo"
     aspect_ratio = b"AspectRatio"
     masking_ratio = b"MaskingRatio"
     mac = b"MacAddress"
@@ -30,7 +30,10 @@ class ACKs(Enum):
     error = b"ERROR"
 
 class Temperatures(Enum):
-    pass
+    msg = "Temperatures"
+
+class SignalInfo(Enum):
+    msg = "IncomingSignalInfo"
 
 class Notifications(Enum):
     activate_profile = b"ActivateProfile"
@@ -102,7 +105,7 @@ class Commands(Enum):
     # close_alert = b"CloseAlertWindow", ACKs.reply
     # display_message = b"DisplayMessage", ACKs.reply
 
-    get_signal_info = b"GetIncomingSignalInfo", SingleCmd, IsInformational.true
+    get_incoming_signal_info = b"GetIncomingSignalInfo", SignalInfo, IsInformational.true
     get_aspect_ratio = b"GetAspectRatio", SingleCmd, IsInformational.true
     get_masking_ratio = b"GetMaskingRatio", SingleCmd, IsInformational.true
     get_temperature = b"GetTemperatures", Temperatures, IsInformational.true

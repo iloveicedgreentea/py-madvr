@@ -7,7 +7,7 @@ from typing import Final
 import re
 import time
 import socket
-from madvr.commands import ACKs, Footer, Commands, Enum, Connections, Temperatures
+from madvr.commands import ACKs, Footer, Commands, Enum, Connections, Temperatures, SignalInfo
 
 class Madvr:
     """MadVR Control"""
@@ -103,7 +103,7 @@ class Madvr:
 
     def _construct_command(
         self, raw_command: str
-    ) -> tuple[bytes, bool]:
+    ) -> tuple[bytes, bool, str]:
         """
         Transform commands into their byte values from the string value
         """
@@ -121,7 +121,7 @@ class Madvr:
         # Check if command is implemented
         if not hasattr(Commands, command):
             self.logger.error("Command not implemented: %s", command)
-            return b"", None
+            return b"", None, ""
 
         # construct the command with nested Enums
         command_name, val, is_info = Commands[command].value
@@ -150,42 +150,89 @@ class Madvr:
         if cmd is False:
             return "Command not found"
 
-        # Send the command
-        self.client.send(cmd)
+        # simple retry logic
+        retry_count = 0
 
-        # read ack which should be ok
-        try:
-            ack_reply = self.client.recv(self.read_limit)
-            if ack_reply != ACKs.reply.value:
-                self.logger.debug("trying to get ack again")
-                second_ack_reply = self.client.recv(self.read_limit)
-                self.logger.debug(second_ack_reply)
-                if ACKs.reply.value.decode() not in second_ack_reply.decode():
-                    self.logger.error("Ack OK not received when sending command: %s", ack_reply)
-                    return "Error: Ack OK not received when sending command"
-        except socket.timeout:
-            self.logger.error("Ack receipt timed out")
-            return "Error: timeout"
-        if is_info:
-            # read response
-            res = self.client.recv(self.read_limit)
-            self.logger.debug(res)
-            # process the output
-            return self._process_info(res, enum_type)
+        # reconnect if client is not init
+        if self.client is None:
+            self.logger.debug("Reforming connection")
+            self.reconnect()
 
-        return "ok"
+        while retry_count < 5:
+            # Send the command
+            self.client.send(cmd)
 
-    def _process_info(self, result: bytes, header: Enum) -> list:
-        #b'Temperatures 59 38 30 34\r\n'
-        if header == Temperatures:
-            self.logger.debug("Type is temp")
-            return self._process_temperatures(result)
+            # read ack which should be ok
+            try:
+                ack_reply = self.client.recv(self.read_limit)
+                
+                # envy can send anything at any time, not very robust API
+                # see if OK is contained in what we read
+                if ACKs.reply.value not in ack_reply:
+                    self.logger.debug("ACK not found in reply: %s", ack_reply)
+                    self.logger.debug("retrying")
+                    retry_count += 1
+                    continue
+
+            except socket.timeout:
+                self.logger.error("Ack receipt timed out, retrying")
+                retry_count += 1
+                continue
+
+            try:
+            # If its an info, get the rest of the info
+                if is_info:
+                    # read response
+                    res = self.client.recv(self.read_limit)
+                    self.logger.debug("Response from info: %s", res)
+
+                    # process the output
+                    return self._process_info(res, enum_type["msg"].value)
+
+            except socket.timeout:
+                self.logger.error("Ack receipt timed out, retrying")
+                retry_count += 1
+                continue
+
+            return "ok"
         
-        return ""
+        # TODO: this should return an actual exception class
+        return "retry count exceeded"
+    
+    # TODO: poll envy for HDR info
+    # TODO: for HA, poll every 1s
+    # TODO: poll SDR in HA as well, basically whatevre the fvalue is
+    # use automation to see when the state changes
+    def poll_hdr(self) -> bool:
+        """
+        Poll envy if HDR is being processed
+        This is needed because HDR flag is broken with JVC NZ, if not others
+        """
+        # simple lookup for now
+        return "HDR" in self.send_command("get_incoming_signal_info")
         
+    def poll_aspect_ratio(self) -> float:
+        """Poll envy for aspect ratio"""
+        # TODO This should use OUTGOING signal info?
+
+    def _process_info(self, input_data: bytes, filter_str: str) -> list:
+        """
+        Process info given input and a filter str
+        """
+        # AspectRatio
+        # IncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9
+        # if we get many responses, split them out
+        lines = input_data.decode().split("\r\n")
+        for line in lines:
+            if filter_str in line:
+                return line.replace(filter_str + " ", "")
+
     def _process_temperatures(self, temp_string: bytes) -> list:
+        """
+        Process the temp stuff
+        """
         # look for things between "Temperature" and \r, using word boundaries
-        # TODO: construct a dict of each kind of sensor
+        # TODO: construct a dict of each kind of sensor, or add as internal state?
         # %gpu% %hdmiInput% “%cpu%” “%mainboard
         return re.findall(r'\b\d+\b', temp_string.decode())
 

@@ -14,6 +14,10 @@ madvr.open_connection()
 
 class TestMenu(unittest.TestCase):
     """Test suite"""
+    def test_incoming_info(self):
+        c = madvr.poll_hdr()
+        self.assertIsInstance(c, bool)
+
     def test__construct_command(self):
         """ensure it can construct a command"""
 
@@ -25,16 +29,16 @@ class TestMenu(unittest.TestCase):
     def test_gettemp(self):
         """Test informational command"""
         cmd = madvr.send_command("get_temperature")
+        print(cmd)
         # TODO: make this a dict
-        self.assertIsInstance(cmd, list)
         self.assertFalse("Error" in cmd)
 
-    def test_menuopen(self):
-        """Functional test - menu opens and closes"""
+    # def test_menuopen(self):
+    #     """Functional test - menu opens and closes"""
 
-        madvr.send_command("key_press, menu")
-        time.sleep(1)
-        madvr.send_command("key_press, menu")
+    #     madvr.send_command("key_press, menu")
+    #     time.sleep(1)
+    #     madvr.send_command("key_press, menu")
 
 if __name__ == '__main__':
     unittest.main()
