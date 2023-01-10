@@ -21,7 +21,7 @@ class TestMenu(unittest.TestCase):
 
     def test_notifications(self):
         # self.skipTest("reason")
-        madvr.read_notifications(False)
+        madvr.read_notifications(True)
 
     def test_incoming_info(self):
         self.skipTest("reason")

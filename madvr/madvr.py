@@ -24,11 +24,13 @@ class Madvr:
         self.port = port
         self.connect_timeout: int = connect_timeout
         self.logger = logger
+
         # Const values
         self.MADVR_OK: Final = Connections.welcome.value
         self.HEARTBEAT: Final = Connections.heartbeat.value
-        self.client = None
+        
         # Incoming attrs
+        # TODO add tehse to HA
         self.incoming_res = ""
         self.incoming_frame_rate = ""
         self.incoming_color_space = ""
@@ -37,7 +39,12 @@ class Madvr:
         self.incoming_colorimetry = ""
         self.incoming_black_levels = ""
         self.incoming_aspect_ratio = ""
+        # TODO: use this to determine masking in HA
+        # TODO convert to float?
         self.aspect_ratio = ""
+
+        # Sockets
+        self.client = None
         self.notification_client = None
         self.is_closed = False
         self.read_limit = 8000
@@ -46,6 +53,7 @@ class Madvr:
 
     def close_connection(self):
         """close the connection"""
+        # TODO: HA should close client on shutdown
         self.client.close()
         self.notification_client.close()
         self.is_closed = True
@@ -164,13 +172,12 @@ class Madvr:
         while wait_forever or i < 5:
             try:
                 self.notification_client.sendall(self.HEARTBEAT)
-                self.logger.debug(self.incoming_bit_depth)
                 data = self.notification_client.recv(self.read_limit)
+                time.sleep(1)
                 i += 1
                 if data:
                     # process data which will get added as class attr
                     self._process_notifications(data)
-                    self.logger.debug(self.incoming_bit_depth)
                 else:
                     # just wait forever for data
                     # send heartbeat keep conn open
@@ -297,6 +304,7 @@ class Madvr:
 
         incoming_signal_info: list = val_dict.get("IncomingSignalInfo", [])
         if incoming_signal_info:
+            self.logger.debug(incoming_signal_info)
             self.incoming_res = incoming_signal_info[0]
             self.incoming_frame_rate = incoming_signal_info[1]
             self.incoming_color_space = incoming_signal_info[3]
@@ -308,7 +316,10 @@ class Madvr:
         
         aspect_ratio: list = val_dict.get("AspectRatio", [])
         if aspect_ratio:
+            self.logger.debug(aspect_ratio)
             self.aspect_ratio = aspect_ratio[1]
+
+        # TODO: add the rest of notifications
 
 
     # TODO: poll envy for HDR info
