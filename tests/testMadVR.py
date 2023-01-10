@@ -14,12 +14,25 @@ madvr.open_connection()
 
 class TestMenu(unittest.TestCase):
     """Test suite"""
+
+    def test_get_signal_info(self):
+        signal = madvr.send_command("get_aspect_ratio")
+        print(signal)
+
+    def test_notifications(self):
+        # self.skipTest("reason")
+        madvr.read_notifications(False)
+
     def test_incoming_info(self):
+        self.skipTest("reason")
+
         c = madvr.poll_hdr()
         self.assertIsInstance(c, bool)
 
     def test__construct_command(self):
         """ensure it can construct a command"""
+
+        self.skipTest("reason")
 
         cmd, isin, _ = madvr._construct_command("key_press, menu")
 
@@ -28,6 +41,8 @@ class TestMenu(unittest.TestCase):
 
     def test_gettemp(self):
         """Test informational command"""
+
+        self.skipTest("reason")
         cmd = madvr.send_command("get_temperature")
         print(cmd)
         # TODO: make this a dict

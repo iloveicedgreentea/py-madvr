@@ -35,6 +35,12 @@ class Temperatures(Enum):
 class SignalInfo(Enum):
     msg = "IncomingSignalInfo"
 
+class OutgoingSignalInfo(Enum):
+    msg = "OutgoingSignalInfo"
+
+class AspectRatio(Enum):
+    msg = "AspectRatio"
+
 class Notifications(Enum):
     activate_profile = b"ActivateProfile"
     incoming_signal = b"IncomingSignalInfo"
@@ -106,7 +112,8 @@ class Commands(Enum):
     # display_message = b"DisplayMessage", ACKs.reply
 
     get_incoming_signal_info = b"GetIncomingSignalInfo", SignalInfo, IsInformational.true
-    get_aspect_ratio = b"GetAspectRatio", SingleCmd, IsInformational.true
+    get_outgoing_signal_info = b"GetOutgoingSignalInfo", OutgoingSignalInfo, IsInformational.true
+    get_aspect_ratio = b"GetAspectRatio", AspectRatio, IsInformational.true
     get_masking_ratio = b"GetMaskingRatio", SingleCmd, IsInformational.true
     get_temperature = b"GetTemperatures", Temperatures, IsInformational.true
     get_macaddress = b"GetMacAddress", SingleCmd, IsInformational.true

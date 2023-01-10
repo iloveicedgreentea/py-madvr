@@ -7,7 +7,7 @@ from typing import Final
 import re
 import time
 import socket
-from madvr.commands import ACKs, Footer, Commands, Enum, Connections, Temperatures, SignalInfo
+from madvr.commands import ACKs, Footer, Commands, Enum, Connections
 
 class Madvr:
     """MadVR Control"""
@@ -28,6 +28,17 @@ class Madvr:
         self.MADVR_OK: Final = Connections.welcome.value
         self.HEARTBEAT: Final = Connections.heartbeat.value
         self.client = None
+        # Incoming attrs
+        self.incoming_res = ""
+        self.incoming_frame_rate = ""
+        self.incoming_color_space = ""
+        self.incoming_bit_depth = ""
+        self.hdr_flag = False
+        self.incoming_colorimetry = ""
+        self.incoming_black_levels = ""
+        self.incoming_aspect_ratio = ""
+        self.aspect_ratio = ""
+        self.notification_client = None
         self.is_closed = False
         self.read_limit = 8000
         self.command_read_timeout = 3
@@ -36,6 +47,7 @@ class Madvr:
     def close_connection(self):
         """close the connection"""
         self.client.close()
+        self.notification_client.close()
         self.is_closed = True
     
     def open_connection(self) -> bool:
@@ -55,10 +67,16 @@ class Madvr:
                 self.logger.info(
                     "Connecting to Envy: %s:%s", self.host, self.port
                 )
+                # Commands
                 self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.client.connect((self.host, self.port))
                 self.client.settimeout(10)
                 
-                self.client.connect((self.host, self.port))
+                # Notifications
+                self.notification_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.notification_client.settimeout(20)
+                self.notification_client.connect((self.host, self.port))
+                
                 self.logger.info("Connected to Envy")
 
                 # Test heartbeat
@@ -66,30 +84,62 @@ class Madvr:
 
                 # Make sure first message says WELCOME
                 msg_envy = self.client.recv(self.read_limit)
-                self.logger.debug(self.MADVR_OK)
-                self.logger.debug(msg_envy)
 
                 # Check if first 7 char match
                 if self.MADVR_OK != msg_envy[:7]:
+                    self.logger.debug(msg_envy)
                     result = f"Envy did not reply with correct greeting: {msg_envy}"
                     self.logger.error(result)
                     return result, False
+
+                # Make sure first message says WELCOME for notifications
+                msg_envy = self.notification_client.recv(self.read_limit)
+
+                # Check if first 7 char match
+                if self.MADVR_OK != msg_envy[:7]:
+                    self.logger.debug(msg_envy)
+                    result = f"Notification did not reply with correct greeting: {msg_envy}"
+                    self.logger.error(result)
+                    return result, False
                 
-                # envy needs some time to setup new connection
+                # envy needs some time to setup new connections
                 time.sleep(3)
 
                 # confirm can send heartbeat, ready for commands
-                self.logger.debug("Sending heartbeat")
+                self.logger.debug("Sending heartbeats")
                 self.client.send(self.HEARTBEAT)
                 
                 # read first 4 bytes for ok\r\n
                 ack_reply = self.client.recv(4)
-                self.logger.debug(ack_reply)
 
                 if ack_reply != ACKs.reply.value:
+                    self.logger.debug(ack_reply)
                     return "Ack OK not received", False
 
-                self.logger.debug("Handshake complete and we are connected")
+                # send heartbeat with notification and read ack and then regular client
+                # ensure both work one after the next
+                self.notification_client.send(self.HEARTBEAT)
+                
+                # read first 4 bytes for ok\r\n
+                ack_reply = self.notification_client.recv(4)
+
+                if ack_reply != ACKs.reply.value:
+                    self.logger.debug(ack_reply)
+                    return "Ack OK not received", False
+                
+                # send again on regular client to make sure both clients work
+                self.client.send(self.HEARTBEAT)
+                
+                # read first 4 bytes for ok\r\n
+                ack_reply = self.client.recv(4)
+
+                if ack_reply != ACKs.reply.value:
+                    self.logger.debug(ack_reply)
+                    return "Ack OK not received", False
+
+                self.logger.debug("Handshakes complete and we are connected")
+
+                # Finished
                 return "Connection done", True
 
             # includes conn refused
@@ -100,6 +150,40 @@ class Madvr:
                 self.logger.warning("Connecting failed, retrying in 2 seconds")
                 self.logger.debug(err)
                 time.sleep(2)
+
+    def read_notifications(self, wait_forever: bool) -> any:
+        """
+        Listen for notifications
+        wait_forever: bool -> if true, it will block forever. False useful for testing
+        """
+        # TODO: should this be a second integration?
+        # Is there a way for HA to always poll in background?z
+        # Receive data in a loop
+
+        i = 0
+        while wait_forever or i < 5:
+            try:
+                self.notification_client.sendall(self.HEARTBEAT)
+                self.logger.debug(self.incoming_bit_depth)
+                data = self.notification_client.recv(self.read_limit)
+                i += 1
+                if data:
+                    # process data which will get added as class attr
+                    self._process_notifications(data)
+                    self.logger.debug(self.incoming_bit_depth)
+                else:
+                    # just wait forever for data
+                    # send heartbeat keep conn open
+                    self.notification_client.sendall(self.HEARTBEAT)
+                    continue
+            except socket.timeout:
+                self.logger.debug('Connection timed out')
+                self.notification_client.sendall(self.HEARTBEAT)
+                continue
+            except socket.error:
+                self.logger.debug('Connection error')
+                self.notification_client.sendall(self.HEARTBEAT)
+                continue
 
     def _construct_command(
         self, raw_command: str
@@ -198,7 +282,35 @@ class Madvr:
         
         # TODO: this should return an actual exception class
         return "retry count exceeded"
-    
+
+    def _process_notifications(self, input_data: bytes) -> None:
+        """
+        Process arbitrary stream of notifications and set them as class attr
+        """
+        pattern = r'([A-Z][^\r\n]*)\r\n'
+        groups = re.findall(pattern, input_data.decode())
+
+        # split the groups, the first element is the key, remove the key from the values
+        # for each match in groups, add it to dict
+        # {"key": ["val1", "val2"]}
+        val_dict: dict = {group.split()[0]: group.replace(group.split()[0] + ' ', '').split() for group in groups}
+
+        incoming_signal_info: list = val_dict.get("IncomingSignalInfo", [])
+        if incoming_signal_info:
+            self.incoming_res = incoming_signal_info[0]
+            self.incoming_frame_rate = incoming_signal_info[1]
+            self.incoming_color_space = incoming_signal_info[3]
+            self.incoming_bit_depth = incoming_signal_info[4]
+            self.hdr_flag = "HDR" in incoming_signal_info[5]
+            self.incoming_colorimetry = incoming_signal_info[6]
+            self.incoming_black_levels = incoming_signal_info[7]
+            self.incoming_aspect_ratio = incoming_signal_info[8]
+        
+        aspect_ratio: list = val_dict.get("AspectRatio", [])
+        if aspect_ratio:
+            self.aspect_ratio = aspect_ratio[1]
+
+
     # TODO: poll envy for HDR info
     # TODO: for HA, poll every 1s
     # TODO: poll SDR in HA as well, basically whatevre the fvalue is
@@ -209,11 +321,13 @@ class Madvr:
         This is needed because HDR flag is broken with JVC NZ, if not others
         """
         # simple lookup for now
+
+         # TODO: process into self attributes?
         return "HDR" in self.send_command("get_incoming_signal_info")
         
     def poll_aspect_ratio(self) -> float:
         """Poll envy for aspect ratio"""
-        # TODO This should use OUTGOING signal info?
+        # TODO This should use spectRatio  info?
 
     def _process_info(self, input_data: bytes, filter_str: str) -> list:
         """
@@ -221,7 +335,8 @@ class Madvr:
         """
         # AspectRatio
         # IncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9
-        # if we get many responses, split them out
+
+       
         lines = input_data.decode().split("\r\n")
         for line in lines:
             if filter_str in line:
