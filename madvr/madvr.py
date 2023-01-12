@@ -8,7 +8,7 @@ import re
 import time
 import socket
 from madvr.commands import ACKs, Footer, Commands, Enum, Connections
-from madvr.errors import AckError, RetryExceededError
+from madvr.errors import AckError, RetryExceededError, HeartBeatError
 
 
 class Madvr:
@@ -46,6 +46,7 @@ class Madvr:
         self.client = None
         self.notification_client = None
         self.is_closed = False
+        # Envy does not have an are you on cmd, just assuming its on based on active connection
         self.is_on = False
         self.read_limit = 8000
         self.command_read_timeout = 3
@@ -62,12 +63,11 @@ class Madvr:
         self.logger.debug("Starting open connection")
 
         try:
-            self.reconnect()
-            self.is_on = True
+            self._reconnect()
         except AckError as err:
             self.logger.error(err)
 
-    def reconnect(self) -> None:
+    def _reconnect(self) -> None:
         """
         Initiate keep-alive connection. This should handle any error and reconnect eventually.
 
@@ -78,19 +78,18 @@ class Madvr:
             # Dumb increasing backoff
             try:
                 self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
-                # Commands
+
+                # Command client
                 self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.client.settimeout(10)
                 self.client.connect((self.host, self.port))
 
-                # Notifications
+                # Notifications client
                 self.notification_client = socket.socket(
                     socket.AF_INET, socket.SOCK_STREAM
                 )
                 self.notification_client.settimeout(20)
                 self.notification_client.connect((self.host, self.port))
-
-                self.logger.info("Connected to Envy")
 
                 # Test heartbeat
                 self.logger.debug("Handshaking")
@@ -100,6 +99,7 @@ class Madvr:
 
                 # Check if first 7 char match
                 if self.MADVR_OK != msg_envy[:7]:
+                    # This is fatal, and should not retry. If it doesn't respond as expected something is wrong
                     raise AckError(
                         f"Notification did not reply with correct greeting: {msg_envy}"
                     )
@@ -112,43 +112,26 @@ class Madvr:
                     raise AckError(
                         f"Notification did not reply with correct greeting: {msg_envy}"
                     )
-
+                self.logger.info("Waiting for envy to be available")
                 # envy needs some time to setup new connections
                 time.sleep(3)
 
-                # confirm can send heartbeat, ready for commands
-                self.logger.debug("Sending heartbeats")
-                self.client.send(self.HEARTBEAT)
+                # handshake func
+                self._send_heartbeat()
+                self.logger.info("Connection established")
 
-                # read first 4 bytes for ok\r\n
-                ack_reply = self.client.recv(4)
-
-                if ack_reply != ACKs.reply.value:
-                    raise AckError(f"{ack_reply} does not match {ACKs.reply.value}")
-
-                # send heartbeat with notification and read ack and then regular client
-                # ensure both work one after the next
-                self.notification_client.send(self.HEARTBEAT)
-
-                # read first 4 bytes for ok\r\n
-                ack_reply = self.notification_client.recv(4)
-
-                if ack_reply != ACKs.reply.value:
-                    raise AckError(f"{ack_reply} does not match {ACKs.reply.value}")
-
-                # send again on regular client to make sure both clients work
-                self.client.send(self.HEARTBEAT)
-
-                # read first 4 bytes for ok\r\n
-                ack_reply = self.client.recv(4)
-
-                if ack_reply != ACKs.reply.value:
-                    raise AckError(f"{ack_reply} does not match {ACKs.reply.value}")
-
-                self.logger.debug("Handshakes complete")
+                self.is_on = True
+                self.is_closed = False
 
                 return
 
+            except HeartBeatError:
+                self.logger.warning(
+                    "Error sending heartbeat, retrying in %s seconds", 2 + backoff
+                )
+                backoff += 1
+                time.sleep(2 + backoff)
+                continue
             # includes conn refused
             # backoff to not spam HA
             except socket.timeout:
@@ -166,6 +149,47 @@ class Madvr:
                 backoff += 1
                 time.sleep(2 + backoff)
                 continue
+
+    def _send_heartbeat(self) -> None:
+        """
+        Send a heartbeat to keep connection open
+
+        You should wrap this in try with socket.error and socket.timeout exceptions
+
+        Raises HeartBeatError exception
+        """
+
+        # confirm can send heartbeat, ready for commands
+        self.logger.debug("Sending heartbeats")
+
+        self.client.send(self.HEARTBEAT)
+
+        # read first 4 bytes for ok\r\n
+        ack_reply = self.client.recv(4)
+
+        if ack_reply != ACKs.reply.value:
+            raise HeartBeatError(f"{ack_reply} does not match {ACKs.reply.value}")
+
+        # send heartbeat with notification and read ack and then regular client
+        # ensure both work one after the next
+        self.notification_client.send(self.HEARTBEAT)
+
+        # read first 4 bytes for ok\r\n
+        ack_reply = self.notification_client.recv(4)
+
+        if ack_reply != ACKs.reply.value:
+            raise HeartBeatError(f"{ack_reply} does not match {ACKs.reply.value}")
+
+        # send again on regular client to make sure both clients work
+        self.client.send(self.HEARTBEAT)
+
+        # read first 4 bytes for ok\r\n
+        ack_reply = self.client.recv(4)
+
+        if ack_reply != ACKs.reply.value:
+            raise HeartBeatError(f"{ack_reply} does not match {ACKs.reply.value}")
+
+        self.logger.debug("Handshakes complete")
 
     def _construct_command(self, raw_command: str) -> tuple[bytes, bool, str]:
         """
@@ -237,10 +261,10 @@ class Madvr:
         # simple retry logic
         retry_count = 0
 
-        # reconnect if client is not init
-        if self.client is None:
+        # reconnect if client is not init or its off
+        if self.client is None or self.is_on is False:
             self.logger.debug("Reforming connection")
-            self.reconnect()
+            self._reconnect()
 
         while retry_count < 5:
             # Send the command
@@ -262,7 +286,11 @@ class Madvr:
                 self.logger.error("Ack receipt timed out, retrying")
                 retry_count += 1
                 continue
-
+            # should catch connection is closed
+            except OSError:
+                self.logger.warning("Connection failed, retrying")
+                retry_count += 1
+                continue
             try:
                 # If its an info, get the rest of the info
                 if is_info:
@@ -271,6 +299,9 @@ class Madvr:
                     self.logger.debug("Response from info: %s", res)
 
                     # process the output
+                    # TODO one day: whatever is not part of our command, write that to attr
+                    # e.g if we ask signal, and get notification for aspect, detect it and write that
+                    # so polling isn't required
                     return self._process_info(res, enum_type["msg"].value)
 
                 return ""
@@ -318,6 +349,11 @@ class Madvr:
         """
         Poll the status for attributes and write them to state
         """
+        # send heartbeat so it doesnt close our connection
+        try:
+            self._send_heartbeat()
+        except (socket.timeout, socket.error, HeartBeatError) as err:
+            self.logger.error("Error getting update: %s", err)
 
         # Get incoming signal info
         for cmd in ["GetIncomingSignalInfo", "GetAspectRatio"]:
@@ -373,28 +409,42 @@ class Madvr:
         # TODO: add temps
 
         # TODO: get outgoing signal
-    
-    def power_off(self) -> str:
-        """turn off madvr it must have a render thread active at the moment"""
-        res = self.send_command("PowerOff")
-        self.is_on = False
-        self.close_connection()
 
-        return res
+    def power_off(self, standby=False) -> str:
+        """
+        turn off madvr it must have a render thread active at the moment
+        once it is off, you can't turn it back on unless standby=True
+        It uses about 30w idle on standby. I use IR via harmony to turn it on
+
+        standby: bool -> standby instead of poweroff if true
+        """
+        try:
+            res = self.send_command("Standby" if standby else "PowerOff")
+            self.close_connection()
+            self.is_on = False
+
+            return res
+
+        except RetryExceededError:
+            return "Retries Exceeded"
 
     def _process_info(self, input_data: bytes, filter_str: str) -> str:
         """
-        Process info given input and a filter str to only return the thing we want e.g for IncomingSignalInfo
-        b"Ok\r\nIncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9\r\nAspect Ratio ETC ETC\r\n" -> IncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9
+        Process info given input and a filter str to only return the thing we want
+        e.g for IncomingSignalInfo
+        b"Ok\r\nIncomingSignalInfo 3840x2160 23.976p 2D 422 
+        10bit HDR10 2020 TV 16:9\r\nAspect Ratio ETC ETC\r\n"
+        turns into -> IncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9
+
+        This is used by _process_notifications to turn it into a dict, add to instance attr
         """
-        # IncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9
 
         lines = input_data.decode().split("\r\n")
         for line in lines:
             if filter_str in line:
                 return line
 
-        return []
+        return ""
 
     def print_commands(self) -> str:
         """
