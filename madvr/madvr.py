@@ -32,7 +32,6 @@ class Madvr:
         self.HEARTBEAT: Final = Connections.heartbeat.value
 
         # Incoming attrs
-        # TODO add tehse to HA
         self.incoming_res = ""
         self.incoming_frame_rate = ""
         self.incoming_color_space = ""
@@ -41,7 +40,6 @@ class Madvr:
         self.incoming_colorimetry = ""
         self.incoming_black_levels = ""
         self.incoming_aspect_ratio = ""
-        # TODO: use this to determine masking in HA
         self.aspect_ratio: float = 0
 
         # Sockets
