@@ -167,47 +167,6 @@ class Madvr:
                 time.sleep(2 + backoff)
                 continue
 
-    def power_off(self) -> str:
-        """turn off madvr it must have a render thread active at the moment"""
-        res = self.send_command("PowerOff")
-        self.is_on = False
-        self.close_connection()
-
-        return res
-
-    def read_notifications(self, wait_forever: bool) -> None:
-        """
-        Listen for notifications
-        wait_forever: bool -> if true, it will block forever. False useful for testing
-        """
-        # TODO: should this be a second integration?
-        # Is there a way for HA to always poll in background?z
-        # Receive data in a loop
-
-        i = 0
-        while wait_forever or i < 5:
-            try:
-                self.notification_client.sendall(self.HEARTBEAT)
-                data = self.notification_client.recv(self.read_limit)
-                time.sleep(1)
-                i += 1
-                if data:
-                    # process data which will get added as class attr
-                    self._process_notifications(data)
-                else:
-                    # just wait forever for data
-                    # send heartbeat keep conn open
-                    self.notification_client.sendall(self.HEARTBEAT)
-                    continue
-            except socket.timeout:
-                self.logger.debug("Connection timed out")
-                self.notification_client.sendall(self.HEARTBEAT)
-                continue
-            except socket.error:
-                self.logger.debug("Connection error")
-                self.notification_client.sendall(self.HEARTBEAT)
-                continue
-
     def _construct_command(self, raw_command: str) -> tuple[bytes, bool, str]:
         """
         Transform commands into their byte values from the string value
@@ -314,18 +273,50 @@ class Madvr:
                     # process the output
                     return self._process_info(res, enum_type["msg"].value)
 
+                return ""
             except socket.timeout:
                 self.logger.error("Ack receipt timed out, retrying")
                 retry_count += 1
                 continue
 
-            return
-
         raise RetryExceededError("Retry count exceeded")
+
+    def read_notifications(self, wait_forever: bool) -> None:
+        """
+        Listen for notifications
+        wait_forever: bool -> if true, it will block forever. False useful for testing
+        """
+        # TODO: should this be a second integration?
+        # Is there a way for HA to always poll in background?z
+        # Receive data in a loop
+
+        i = 0
+        while wait_forever or i < 5:
+            try:
+                self.notification_client.sendall(self.HEARTBEAT)
+                data = self.notification_client.recv(self.read_limit)
+                time.sleep(1)
+                i += 1
+                if data:
+                    # process data which will get added as class attr
+                    self._process_notifications(data)
+                else:
+                    # just wait forever for data
+                    # send heartbeat keep conn open
+                    self.notification_client.sendall(self.HEARTBEAT)
+                    continue
+            except socket.timeout:
+                self.logger.debug("Connection timed out")
+                self.notification_client.sendall(self.HEARTBEAT)
+                continue
+            except socket.error:
+                self.logger.debug("Connection error")
+                self.notification_client.sendall(self.HEARTBEAT)
+                continue
 
     def poll_status(self) -> None:
         """
-        Poll the status for attributes
+        Poll the status for attributes and write them to state
         """
 
         # Get incoming signal info
@@ -339,27 +330,27 @@ class Madvr:
 
     def _process_notifications(self, input_data: Union[bytes, str]) -> None:
         """
-        Process arbitrary stream of notifications and set them as class attr
+        Process arbitrary stream of notifications and set them as instance attr
         """
         self.logger.debug("Processing data for %s", input_data)
         if isinstance(input_data, bytes):
+            # This pattern will be able to extract from the byte encoded stream
             pattern = r"([A-Z][^\r\n]*)\r\n"
             groups = re.findall(pattern, input_data.decode())
+            # split the groups, the first element is the key, remove the key from the values
+            # for each match in groups, add it to dict
+            # {"key": ["val1", "val2"]}
             val_dict: dict = {
                 group.split()[0]: group.replace(group.split()[0] + " ", "").split()
                 for group in groups
             }
             self.logger.debug("groups: %s", groups)
         else:
+            # This pattern extracts from a regular string
             pattern = r"([A-Z][A-Za-z]*)\s(.*)"
             match = re.search(pattern, input_data)
             val_dict: dict = {match.group(1): match.group(2).split()}
 
-        
-        # split the groups, the first element is the key, remove the key from the values
-        # for each match in groups, add it to dict
-        # {"key": ["val1", "val2"]}
-        
         self.logger.debug("val dict: %s", val_dict)
 
         incoming_signal_info: list = val_dict.get("IncomingSignalInfo", [])
@@ -382,6 +373,14 @@ class Madvr:
         # TODO: add temps
 
         # TODO: get outgoing signal
+    
+    def power_off(self) -> str:
+        """turn off madvr it must have a render thread active at the moment"""
+        res = self.send_command("PowerOff")
+        self.is_on = False
+        self.close_connection()
+
+        return res
 
     def _process_info(self, input_data: bytes, filter_str: str) -> str:
         """
