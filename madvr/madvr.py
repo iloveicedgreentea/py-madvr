@@ -3,7 +3,7 @@ Implements the MadVR protocol
 """
 
 import logging
-from typing import Final
+from typing import Final, Union
 import re
 import time
 import socket
@@ -20,7 +20,7 @@ class Madvr:
         # Can supply a logger object. It can hook into the HA logger
         logger: logging.Logger = logging.getLogger(__name__),
         port: int = 44077,
-        connect_timeout: int = 10,
+        connect_timeout: int = 5,
     ):
         self.host = host
         self.port = port
@@ -42,20 +42,19 @@ class Madvr:
         self.incoming_black_levels = ""
         self.incoming_aspect_ratio = ""
         # TODO: use this to determine masking in HA
-        # TODO convert to float?
         self.aspect_ratio: float = 0
 
         # Sockets
         self.client = None
         self.notification_client = None
         self.is_closed = False
+        self.is_on = False
         self.read_limit = 8000
         self.command_read_timeout = 3
         self.logger.debug("Running in debug mode")
 
     def close_connection(self) -> None:
         """close the connection"""
-        # TODO: HA should close client on shutdown
         self.client.close()
         self.notification_client.close()
         self.is_closed = True
@@ -66,22 +65,25 @@ class Madvr:
 
         try:
             self.reconnect()
+            self.is_on = True
         except AckError as err:
             self.logger.error(err)
 
     def reconnect(self) -> None:
         """
         Initiate keep-alive connection. This should handle any error and reconnect eventually.
-        
+
         Raises AckError
         """
+        backoff = 0
         while True:
+            # Dumb increasing backoff
             try:
                 self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
                 # Commands
                 self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.client.connect((self.host, self.port))
                 self.client.settimeout(10)
+                self.client.connect((self.host, self.port))
 
                 # Notifications
                 self.notification_client = socket.socket(
@@ -150,13 +152,30 @@ class Madvr:
                 return
 
             # includes conn refused
+            # backoff to not spam HA
             except socket.timeout:
-                self.logger.warning("Connection timed out, retrying in 2 seconds")
-                time.sleep(2)
+                self.logger.warning(
+                    "Connecting timeout, retrying in %s seconds", 2 + backoff
+                )
+                backoff += 1
+                time.sleep(2 + backoff)
+                continue
             except OSError as err:
-                self.logger.warning("Connecting failed, retrying in 2 seconds")
+                self.logger.warning(
+                    "Connecting failed, retrying in %s seconds", 2 + backoff
+                )
                 self.logger.debug(err)
-                time.sleep(2)
+                backoff += 1
+                time.sleep(2 + backoff)
+                continue
+
+    def power_off(self) -> str:
+        """turn off madvr it must have a render thread active at the moment"""
+        res = self.send_command("PowerOff")
+        self.is_on = False
+        self.close_connection()
+
+        return res
 
     def read_notifications(self, wait_forever: bool) -> None:
         """
@@ -205,7 +224,7 @@ class Madvr:
         # split command into the base and the action like menu: left
         self.logger.debug("raw_command: %s", raw_command)
         skip_val = False
-        
+
         # This lets you use single cmds or something with val like KEYPRESS
         try:
             # key_press, menu
@@ -234,7 +253,9 @@ class Madvr:
                 # Construct command based on required values
                 cmd: bytes = command_base + Footer.footer.value
             except KeyError as exc:
-                raise NotImplementedError("Incorrect parameter given for command") from exc
+                raise NotImplementedError(
+                    "Incorrect parameter given for command"
+                ) from exc
         else:
             cmd: bytes = command_name + Footer.footer.value
 
@@ -255,6 +276,7 @@ class Madvr:
         except NotImplementedError:
             return "Command not found"
 
+        self.logger.debug("using values: %s %s %s", cmd, is_info, enum_type)
         # simple retry logic
         retry_count = 0
 
@@ -303,25 +325,48 @@ class Madvr:
 
         raise RetryExceededError("Retry count exceeded")
 
+    def poll_status(self) -> None:
+        """
+        Poll the status for attributes
+        """
 
-    def _process_notifications(self, input_data: bytes) -> None:
+        # Get incoming signal info
+        for cmd in ["GetIncomingSignalInfo", "GetAspectRatio"]:
+            res = self.send_command(cmd)
+            self.logger.debug("poll_status resp: %s", res)
+            self._process_notifications(res)
+
+        # Get Temps
+        # Get outoging temps
+
+    def _process_notifications(self, input_data: Union[bytes, str]) -> None:
         """
         Process arbitrary stream of notifications and set them as class attr
         """
-        pattern = r"([A-Z][^\r\n]*)\r\n"
-        groups = re.findall(pattern, input_data.decode())
+        self.logger.debug("Processing data for %s", input_data)
+        if isinstance(input_data, bytes):
+            pattern = r"([A-Z][^\r\n]*)\r\n"
+            groups = re.findall(pattern, input_data.decode())
+            val_dict: dict = {
+                group.split()[0]: group.replace(group.split()[0] + " ", "").split()
+                for group in groups
+            }
+            self.logger.debug("groups: %s", groups)
+        else:
+            pattern = r"([A-Z][A-Za-z]*)\s(.*)"
+            match = re.search(pattern, input_data)
+            val_dict: dict = {match.group(1): match.group(2).split()}
 
+        
         # split the groups, the first element is the key, remove the key from the values
         # for each match in groups, add it to dict
         # {"key": ["val1", "val2"]}
-        val_dict: dict = {
-            group.split()[0]: group.replace(group.split()[0] + " ", "").split()
-            for group in groups
-        }
+        
+        self.logger.debug("val dict: %s", val_dict)
 
         incoming_signal_info: list = val_dict.get("IncomingSignalInfo", [])
         if incoming_signal_info:
-            self.logger.debug(incoming_signal_info)
+            self.logger.debug("incoming signal detected: %s", incoming_signal_info)
             self.incoming_res = incoming_signal_info[0]
             self.incoming_frame_rate = incoming_signal_info[1]
             self.incoming_color_space = incoming_signal_info[3]
@@ -333,49 +378,26 @@ class Madvr:
 
         aspect_ratio: list = val_dict.get("AspectRatio", [])
         if aspect_ratio:
-            self.logger.debug(aspect_ratio)
-            self.aspect_ratio = aspect_ratio[1]
+            self.logger.debug("incoming AR detected: %s", aspect_ratio)
+            self.aspect_ratio = float(aspect_ratio[1])
 
-        # TODO: add the rest of notifications
+        # TODO: add temps
 
-    # TODO: poll envy for HDR info
-    # TODO: for HA, poll every 1s
-    # TODO: poll SDR in HA as well, basically whatevre the fvalue is
-    # use automation to see when the state changes
-    def poll_hdr(self) -> bool:
+        # TODO: get outgoing signal
+
+    def _process_info(self, input_data: bytes, filter_str: str) -> str:
         """
-        Poll envy if HDR is being processed
-        This is needed because HDR flag is broken with JVC NZ, if not others
+        Process info given input and a filter str to only return the thing we want e.g for IncomingSignalInfo
+        b"Ok\r\nIncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9\r\nAspect Ratio ETC ETC\r\n" -> IncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9
         """
-        # simple lookup for now
-
-        # TODO: process into self attributes?
-        return "HDR" in self.send_command("get_incoming_signal_info")
-
-    def poll_aspect_ratio(self) -> float:
-        """Poll envy for aspect ratio"""
-        # TODO This should use spectRatio  info?
-
-    def _process_info(self, input_data: bytes, filter_str: str) -> list:
-        """
-        Process info given input and a filter str
-        """
-        # AspectRatio
         # IncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9
 
         lines = input_data.decode().split("\r\n")
         for line in lines:
             if filter_str in line:
-                return line.replace(filter_str + " ", "")
+                return line
 
-    def _process_temperatures(self, temp_string: bytes) -> list:
-        """
-        Process the temp stuff
-        """
-        # look for things between "Temperature" and \r, using word boundaries
-        # TODO: construct a dict of each kind of sensor, or add as internal state?
-        # %gpu% %hdmiInput% “%cpu%” “%mainboard
-        return re.findall(r"\b\d+\b", temp_string.decode())
+        return []
 
     def print_commands(self) -> str:
         """
