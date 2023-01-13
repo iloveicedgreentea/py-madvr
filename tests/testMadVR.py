@@ -49,48 +49,45 @@ class TestLib(unittest.TestCase):
 
 class TestFunctional(unittest.TestCase):
     """Test suite"""
+
     madvr.open_connection()
 
     def test_a_poll(self):
-        self.skipTest("")
-        
+        # self.skipTest("")
+        print("running test_a_poll")
+
         self.assertEqual(madvr.incoming_res, "")
         madvr.poll_status()
         self.assertNotEqual(madvr.incoming_res, "")
 
-    def test_b_aspect(self):
-        """Ensure commands actually send"""
-        self.skipTest("")
+        print("running test_b_aspect")
         signal = madvr.send_command("GetAspectRatio")
         self.assertNotEqual(signal, "Command not found")
 
         signal = madvr.send_command("KeyPress, UP")
         self.assertNotEqual(signal, "Command not found")
 
-    def test_c_command_notfound(self):
-        """Ensure wrong commands are caught"""
-        self.skipTest("")
+        print("running test_c_command_notfound")
         fake_cmd = madvr.send_command("FakeCommand")
         self.assertEqual(fake_cmd, "Command not found")
 
         fake_param = madvr.send_command("KeyPress, FAKEKEY")
         self.assertEqual(fake_param, "Command not found")
+        
+        # print("running test_d_notifications")
+        # madvr.read_notifications(True)
 
-    def test_d_notifications(self):
-        """Make sure notifications work"""
-        self.skipTest("Temp")
-        madvr.read_notifications(True)
-
-    def test_e_menuopen(self):
-        """Functional test - menu opens and closes"""
-
-        madvr.send_command("key_press, menu")
+        print("running test_e_menuopen")
+        cmd = madvr.send_command("KeyPress, MENU")
+        self.assertNotEqual(cmd, "Command not found")
+        
         time.sleep(1)
-        madvr.send_command("key_press, menu")
+        cmd = madvr.send_command("KeyPress, MENU")
+        self.assertNotEqual(cmd, "Command not found")
 
-    def test_z_ConnClose(self):
+        print("running test_z_ConnClose")
         madvr.close_connection()
         self.assertEqual(True, madvr.is_closed)
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(failfast=True)

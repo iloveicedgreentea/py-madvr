@@ -272,12 +272,19 @@ class Madvr:
 
             # read ack which should be ok
             try:
-                ack_reply = self.client.recv(self.read_limit)
+                # Read the ok
+                ack_reply = self.client.recv(4)
+                self.logger.debug("Got ack from cmd: %s", ack_reply)
+                # Don't read if its informational
+                if not is_info:
+                    # envy replies with the same command we need to read to clear the buffer
+                    cmd_mirror_reply= self.client.recv(self.read_limit)
+                    self.logger.debug("Got mirror_reply from cmd: %s", cmd_mirror_reply)
 
                 # envy can send anything at any time, not very robust API
                 # see if OK is contained in what we read
                 if ACKs.reply.value not in ack_reply:
-                    self.logger.debug("ACK not found in reply: %s", ack_reply)
+                    self.logger.error("ACK not found in reply. Got: %s", ack_reply)
                     self.logger.debug("retrying")
                     retry_count += 1
                     continue
