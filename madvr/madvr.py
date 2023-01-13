@@ -42,6 +42,21 @@ class Madvr:
         self.incoming_aspect_ratio = ""
         self.aspect_ratio: float = 0
 
+        # Temps
+        self.temp_gpu: int = 0
+        self.temp_hdmi: int = 0
+        self.temp_cpu: int = 0
+        self.temp_mainboard: int  = 0
+
+        # Outgoing signal
+        self.outgoing_res = ""
+        self.outgoing_frame_rate = ""
+        self.outgoing_color_space = ""
+        self.outgoing_bit_depth = ""
+        self.outgoing_colorimetry = ""
+        self.outgoing_hdr_flag = False
+        self.outgoing_black_levels = ""
+
         # Sockets
         self.client = None
         self.notification_client = None
@@ -252,33 +267,35 @@ class Madvr:
         Raises RetryExceededError
         """
 
+        # Verify the command is supported
         try:
             cmd, is_info, enum_type = self._construct_command(command)
         except NotImplementedError:
             return "Command not found"
 
         self.logger.debug("using values: %s %s %s", cmd, is_info, enum_type)
+
         # simple retry logic
         retry_count = 0
 
         # reconnect if client is not init or its off
         if self.client is None or self.is_on is False:
-            self.logger.debug("Reforming connection")
+            self.logger.debug("Connection lost - restarting connection")
             self._reconnect()
 
         while retry_count < 5:
             # Send the command
             self.client.send(cmd)
 
-            # read ack which should be ok
             try:
-                # Read the ok
+                # Read the Ok\r\n
                 ack_reply = self.client.recv(4)
                 self.logger.debug("Got ack from cmd: %s", ack_reply)
-                # Don't read if its informational
+                # Don't read more if its informational
                 if not is_info:
-                    # envy replies with the same command we need to read to clear the buffer
-                    cmd_mirror_reply= self.client.recv(self.read_limit)
+                    # envy replies with the same command for non-info we need to read to clear the buffer
+                    # else will ruin next commands
+                    cmd_mirror_reply = self.client.recv(self.read_limit)
                     self.logger.debug("Got mirror_reply from cmd: %s", cmd_mirror_reply)
 
                 # envy can send anything at any time, not very robust API
@@ -298,36 +315,40 @@ class Madvr:
                 self.logger.warning("Connection failed, retrying")
                 retry_count += 1
                 continue
+
+            # If its an info, get the rest of the info
             try:
-                # If its an info, get the rest of the info
                 if is_info:
                     # read response
                     res = self.client.recv(self.read_limit)
                     self.logger.debug("Response from info: %s", res)
 
-                    # process the output
                     # TODO one day: whatever is not part of our command, write that to attr
                     # e.g if we ask signal, and get notification for aspect, detect it and write that
                     # so polling isn't required
+
+                    # process the output
                     return self._process_info(res, enum_type["msg"].value)
 
                 return ""
+
             except socket.timeout:
                 self.logger.error("Ack receipt timed out, retrying")
                 retry_count += 1
                 continue
 
+        # raise if we got here
         raise RetryExceededError("Retry count exceeded")
 
     def read_notifications(self, wait_forever: bool) -> None:
         """
-        Listen for notifications
+        Listen for notifications. Meant to run as a background task
         wait_forever: bool -> if true, it will block forever. False useful for testing
         """
         # TODO: should this be a second integration?
         # Is there a way for HA to always poll in background?z
-        # Receive data in a loop
 
+        # Receive data in a loop
         i = 0
         while wait_forever or i < 5:
             try:
@@ -363,19 +384,17 @@ class Madvr:
             self.logger.error("Error getting update: %s", err)
 
         # Get incoming signal info
-        for cmd in ["GetIncomingSignalInfo", "GetAspectRatio"]:
+        for cmd in ["GetIncomingSignalInfo", "GetAspectRatio", "GetTemperatures", "GetOutgoingSignalInfo"]:
             res = self.send_command(cmd)
             self.logger.debug("poll_status resp: %s", res)
             self._process_notifications(res)
-
-        # Get Temps
-        # Get outoging temps
 
     def _process_notifications(self, input_data: Union[bytes, str]) -> None:
         """
         Process arbitrary stream of notifications and set them as instance attr
         """
         self.logger.debug("Processing data for %s", input_data)
+
         if isinstance(input_data, bytes):
             # This pattern will be able to extract from the byte encoded stream
             pattern = r"([A-Z][^\r\n]*)\r\n"
@@ -390,12 +409,14 @@ class Madvr:
             self.logger.debug("groups: %s", groups)
         else:
             # This pattern extracts from a regular string
+            # If we have a str its assumed we are dealing with one output stream
             pattern = r"([A-Z][A-Za-z]*)\s(.*)"
             match = re.search(pattern, input_data)
             val_dict: dict = {match.group(1): match.group(2).split()}
 
         self.logger.debug("val dict: %s", val_dict)
 
+        # Map values to attr
         incoming_signal_info: list = val_dict.get("IncomingSignalInfo", [])
         if incoming_signal_info:
             self.logger.debug("incoming signal detected: %s", incoming_signal_info)
@@ -413,9 +434,24 @@ class Madvr:
             self.logger.debug("incoming AR detected: %s", aspect_ratio)
             self.aspect_ratio = float(aspect_ratio[1])
 
-        # TODO: add temps
+        get_temps: list = val_dict.get("Temperatures", [])
+        if get_temps:
+            self.logger.debug("incoming Temps detected: %s", get_temps)
+            self.temp_gpu = int(get_temps[0])
+            self.temp_hdmi = int(get_temps[1])
+            self.temp_cpu = int(get_temps[2])
+            self.temp_mainboard = int(get_temps[3])
 
-        # TODO: get outgoing signal
+        outgoing_signal_info: list = val_dict.get("OutgoingSignalInfo", [])
+        if outgoing_signal_info:
+            self.logger.debug("outgoing signal detected: %s", outgoing_signal_info)
+            self.outgoing_res = outgoing_signal_info[0]
+            self.outgoing_frame_rate = outgoing_signal_info[1]
+            self.outgoing_color_space = outgoing_signal_info[3]
+            self.outgoing_bit_depth = outgoing_signal_info[4]
+            self.hdr_flag = "HDR" in outgoing_signal_info[5]
+            self.outgoing_colorimetry = outgoing_signal_info[6]
+            self.outgoing_black_levels = outgoing_signal_info[7]
 
     def power_off(self, standby=False) -> str:
         """
@@ -439,7 +475,7 @@ class Madvr:
         """
         Process info given input and a filter str to only return the thing we want
         e.g for IncomingSignalInfo
-        b"Ok\r\nIncomingSignalInfo 3840x2160 23.976p 2D 422 
+        b"Ok\r\nIncomingSignalInfo 3840x2160 23.976p 2D 422
         10bit HDR10 2020 TV 16:9\r\nAspect Ratio ETC ETC\r\n"
         turns into -> IncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9
 
