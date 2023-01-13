@@ -4,6 +4,7 @@ dev_install:
 	python3 -m venv .venv
 	. .venv/bin/activate && \
 	pip3 install -r requirements-test.txt
+
 test:
 	python -m unittest discover -s tests
 

@@ -35,27 +35,33 @@ class Temperatures(Enum):
 class SignalInfo(Enum):
     msg = "IncomingSignalInfo"
 
+class OutgoingSignalInfo(Enum):
+    msg = "OutgoingSignalInfo"
+
+class AspectRatio(Enum):
+    msg = "AspectRatio"
+
 class Notifications(Enum):
-    activate_profile = b"ActivateProfile"
-    incoming_signal = b"IncomingSignalInfo"
-    outgoing_signal = b"OngoingSignalInfo"
-    aspect_ratio = b"AspectRatio"
-    masking_ratio = b"MaskingRatio"
+    ActivateProfile = b"ActivateProfile"
+    IncomingSignalInfo = b"IncomingSignalInfo"
+    OngoingSignalInfo = b"OngoingSignalInfo"
+    AspectRatio = b"AspectRatio"
+    MaskingRatio = b"MaskingRatio"
 
 class KeyPress(Enum):
-    menu = b"MENU"
-    up = b"UP"
-    down = b"DOWN"
-    left = b"LEFT"
-    right = b"RIGHT"
-    ok = b"OK"
-    inp = b"INPUT"
-    settings = b"SETTINGS"
-    red = b"RED"
-    green = b"GREEN"
-    blue = b"BLUE"
-    yellow = b"YELLOW"
-    power = b"POWER"
+    MENU = b"MENU"
+    UP = b"UP"
+    DOWN = b"DOWN"
+    LEFT = b"LEFT"
+    RIGHT = b"RIGHT"
+    OK = b"OK"
+    INPUT = b"INPUT"
+    SETTINGS = b"SETTINGS"
+    RED = b"RED"
+    GREEN = b"GREEN"
+    BLUE = b"BLUE"
+    YELLOW = b"YELLOW"
+    POWER = b"POWER"
 
 class DisplayAlert(Enum):
     pass
@@ -82,11 +88,11 @@ class IsInformational(Enum):
 
 class Commands(Enum):
     # Power stuff
-    power_off = b"PowerOff", SingleCmd, IsInformational.false
-    standby = b"Standby", SingleCmd, IsInformational.false
-    restart = b"Restart", SingleCmd, IsInformational.false
-    reload_software = b"ReloadSoftware", SingleCmd, IsInformational.false
-    bye = b"Bye", SingleCmd, IsInformational.false
+    PowerOff = b"PowerOff", SingleCmd, IsInformational.false
+    Standby = b"Standby", SingleCmd, IsInformational.false
+    Restart = b"Restart", SingleCmd, IsInformational.false
+    ReloadSoftware = b"ReloadSoftware", SingleCmd, IsInformational.false
+    Bye = b"Bye", SingleCmd, IsInformational.false
 
     #  vb'KeyPress MENU\r\n'
 # b'CloseMenu\r\n'
@@ -95,21 +101,21 @@ class Commands(Enum):
     # b'OK\r\nAspectRatio 3816:2146 1.778 178 "16:9"\r\nResetTemporary\r\nNoSignal\r\nOutgoingSignalInfo 4096x2160 59.940p 2D RGB 8bit SDR 709 TV\r\nIncomingSignalInfo 1280x720 59.940p 2D 422 12bit SDR 709 TV 16:9\r\nAspectRatio 1280:0720 1.778 178 "16:9"\r\nAspectRatio 1272:0525 2.423 240 "Panavision"\r\nMaskingRatio 4092:1689 2.423 240\r\n'
 
     # Menu
-    open_menu = b"OpenMenu", SingleCmd, IsInformational.false
-    close_menu = b"CloseMenu", SingleCmd, IsInformational.false
-    key_press = b"KeyPress", KeyPress, IsInformational.false
-    key_press_hold = b"KeyHold", KeyPress, IsInformational.false
+    OpenMenu = b"OpenMenu", SingleCmd, IsInformational.false
+    CloseMenu = b"CloseMenu", SingleCmd, IsInformational.false
+    KeyPress = b"KeyPress", KeyPress, IsInformational.false
+    KeyHold = b"KeyHold", KeyPress, IsInformational.false
     
-
     # display_alert = b"DisplayAlertWindow", ACKs.reply
     # close_alert = b"CloseAlertWindow", ACKs.reply
     # display_message = b"DisplayMessage", ACKs.reply
 
-    get_incoming_signal_info = b"GetIncomingSignalInfo", SignalInfo, IsInformational.true
-    get_aspect_ratio = b"GetAspectRatio", SingleCmd, IsInformational.true
-    get_masking_ratio = b"GetMaskingRatio", SingleCmd, IsInformational.true
-    get_temperature = b"GetTemperatures", Temperatures, IsInformational.true
-    get_macaddress = b"GetMacAddress", SingleCmd, IsInformational.true
+    GetIncomingSignalInfo = b"GetIncomingSignalInfo", SignalInfo, IsInformational.true
+    GetOutgoingSignalInfo = b"GetOutgoingSignalInfo", OutgoingSignalInfo, IsInformational.true
+    GetAspectRatio = b"GetAspectRatio", AspectRatio, IsInformational.true
+    GetMaskingRatio = b"GetMaskingRatio", SingleCmd, IsInformational.true
+    GetTemperatures = b"GetTemperatures", Temperatures, IsInformational.true
+    GetMacAddress = b"GetMacAddress", SingleCmd, IsInformational.true
 
     # enum_settings = b"EnumSettingsPages"
     # enum_configs = b"EnumConfigPages"
@@ -119,9 +125,9 @@ class Commands(Enum):
     # reset_temp = b"ResetTemporary"
 
     # toggle = b"Toggle"
-    tone_map_on = b"ToneMapOn", SingleCmd, IsInformational.false
-    tone_map_off = b"ToneMapOff", SingleCmd, IsInformational.false
+    ToneMapOn = b"ToneMapOn", SingleCmd, IsInformational.false
+    ToneMapOff = b"ToneMapOff", SingleCmd, IsInformational.false
 
-    hotplug = b"Hotplug", SingleCmd, IsInformational.false
-    refresh_license = b"RefreshLicenseInfo", SingleCmd, IsInformational.false
-    force_1080p = b"Force1080p60Output", SingleCmd, IsInformational.false
+    Hotplug = b"Hotplug", SingleCmd, IsInformational.false
+    RefreshLicenseInfo = b"RefreshLicenseInfo", SingleCmd, IsInformational.false
+    Force1080p60Output = b"Force1080p60Output", SingleCmd, IsInformational.false
