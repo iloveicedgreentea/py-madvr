@@ -27,7 +27,7 @@ class Madvr:
         self.port = port
         self.connect_timeout: int = connect_timeout
         self.logger = logger
-        self._lock = threading.Lock()
+        self._cmd_running = False
 
         # Const values
         self.MADVR_OK: Final = Connections.welcome.value
@@ -268,7 +268,7 @@ class Madvr:
         command: str - command to send like KeyPress, MENU
         Raises RetryExceededError
         """
-
+        self._cmd_running = False
         # Verify the command is supported
         try:
             cmd, is_info, enum_type = self._construct_command(command)
@@ -286,6 +286,7 @@ class Madvr:
             self._reconnect()
 
         while retry_count < 5:
+            self._cmd_running = True
             # Send the command
             self.client.send(cmd)
 
@@ -330,8 +331,10 @@ class Madvr:
                     # so polling isn't required
 
                     # process the output
+                    self._cmd_running = False
                     return self._process_info(res, enum_type["msg"].value)
-
+                
+                self._cmd_running = False
                 return ""
 
             except socket.timeout:
@@ -340,6 +343,7 @@ class Madvr:
                 continue
 
         # raise if we got here
+        self._cmd_running = False
         raise RetryExceededError("Retry count exceeded")
 
     def read_notifications(self, wait_forever: bool) -> None:
@@ -379,27 +383,26 @@ class Madvr:
         """
         Poll the status for attributes and write them to state
         """
-        # If its locked, return
-        if not self._lock.acquire(blocking=False): # pylint: disable=consider-using-with
+
+        # dont run this multiple times as HA loves doing
+        if self._cmd_running:
             return
 
-        # lock so HA doesn't trip over itself
-        with self._lock:
-            try:
-                # send heartbeat so it doesnt close our connection
-                self._send_heartbeat()
-                # Get incoming signal info
-                for cmd in [
-                    "GetIncomingSignalInfo",
-                    "GetAspectRatio",
-                    "GetTemperatures",
-                    "GetOutgoingSignalInfo",
-                ]:
-                    res = self.send_command(cmd)
-                    self.logger.debug("poll_status resp: %s", res)
-                    self._process_notifications(res)
-            except (socket.timeout, socket.error, HeartBeatError) as err:
-                self.logger.error("Error getting update: %s", err)
+        try:
+            # send heartbeat so it doesnt close our connection
+            self._send_heartbeat()
+            # Get incoming signal info
+            for cmd in [
+                "GetIncomingSignalInfo",
+                "GetAspectRatio",
+                "GetTemperatures",
+                "GetOutgoingSignalInfo",
+            ]:
+                res = self.send_command(cmd)
+                self.logger.debug("poll_status resp: %s", res)
+                self._process_notifications(res)
+        except (socket.timeout, socket.error, HeartBeatError) as err:
+            self.logger.error("Error getting update: %s", err)
 
     def _process_notifications(self, input_data: Union[bytes, str]) -> None:
         """
