@@ -309,7 +309,7 @@ class Madvr:
                     continue
 
             except socket.timeout:
-                self.logger.error("Ack receipt timed out, retrying")
+                self.logger.debug("Ack receipt timed out, retrying")
                 retry_count += 1
                 continue
             # should catch connection is closed
@@ -335,7 +335,7 @@ class Madvr:
                 return ""
 
             except socket.timeout:
-                self.logger.error("Ack receipt timed out, retrying")
+                self.logger.debug("Ack receipt timed out, retrying")
                 retry_count += 1
                 continue
 
