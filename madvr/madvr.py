@@ -6,6 +6,7 @@ import logging
 from typing import Final, Union
 import re
 import time
+import threading
 import socket
 from madvr.commands import ACKs, Footer, Commands, Enum, Connections
 from madvr.errors import AckError, RetryExceededError, HeartBeatError
@@ -26,6 +27,7 @@ class Madvr:
         self.port = port
         self.connect_timeout: int = connect_timeout
         self.logger = logger
+        self._lock = threading.Lock()
 
         # Const values
         self.MADVR_OK: Final = Connections.welcome.value
@@ -46,7 +48,7 @@ class Madvr:
         self.temp_gpu: int = 0
         self.temp_hdmi: int = 0
         self.temp_cpu: int = 0
-        self.temp_mainboard: int  = 0
+        self.temp_mainboard: int = 0
 
         # Outgoing signal
         self.outgoing_res = ""
@@ -288,8 +290,8 @@ class Madvr:
             self.client.send(cmd)
 
             try:
-                # Read the Ok\r\n
-                ack_reply = self.client.recv(4)
+                # Read everything because it can randomly include notifications ugh
+                ack_reply = self.client.recv(self.read_limit)
                 self.logger.debug("Got ack from cmd: %s", ack_reply)
                 # Don't read more if its informational
                 if not is_info:
@@ -377,17 +379,23 @@ class Madvr:
         """
         Poll the status for attributes and write them to state
         """
-        # send heartbeat so it doesnt close our connection
-        try:
-            self._send_heartbeat()
-        except (socket.timeout, socket.error, HeartBeatError) as err:
-            self.logger.error("Error getting update: %s", err)
-
-        # Get incoming signal info
-        for cmd in ["GetIncomingSignalInfo", "GetAspectRatio", "GetTemperatures", "GetOutgoingSignalInfo"]:
-            res = self.send_command(cmd)
-            self.logger.debug("poll_status resp: %s", res)
-            self._process_notifications(res)
+        # lock so HA doesn't trip over itself
+        with self._lock:
+            try:
+                # send heartbeat so it doesnt close our connection
+                self._send_heartbeat()
+                # Get incoming signal info
+                for cmd in [
+                    "GetIncomingSignalInfo",
+                    "GetAspectRatio",
+                    "GetTemperatures",
+                    "GetOutgoingSignalInfo",
+                ]:
+                    res = self.send_command(cmd)
+                    self.logger.debug("poll_status resp: %s", res)
+                    self._process_notifications(res)
+            except (socket.timeout, socket.error, HeartBeatError) as err:
+                self.logger.error("Error getting update: %s", err)
 
     def _process_notifications(self, input_data: Union[bytes, str]) -> None:
         """

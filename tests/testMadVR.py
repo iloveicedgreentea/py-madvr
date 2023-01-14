@@ -54,20 +54,23 @@ class TestFunctional(unittest.TestCase):
 
     def test_a_poll(self):
         # self.skipTest("")
-        print("running test_a_poll")
 
         self.assertEqual(madvr.incoming_res, "")
         madvr.poll_status()
         self.assertNotEqual(madvr.incoming_res, "")
+        self.assertNotEqual(madvr.outgoing_color_space, "")
+        print(
+            madvr.hdr_flag,
+            madvr.incoming_aspect_ratio,
+            madvr.incoming_frame_rate
+        )
 
-        print("running test_b_aspect")
         signal = madvr.send_command("GetAspectRatio")
         self.assertNotEqual(signal, "Command not found")
 
         signal = madvr.send_command("KeyPress, UP")
         self.assertNotEqual(signal, "Command not found")
 
-        print("running test_c_command_notfound")
         fake_cmd = madvr.send_command("FakeCommand")
         self.assertEqual(fake_cmd, "Command not found")
 
@@ -77,7 +80,6 @@ class TestFunctional(unittest.TestCase):
         # print("running test_d_notifications")
         # madvr.read_notifications(True)
 
-        print("running test_e_menuopen")
         cmd = madvr.send_command("KeyPress, MENU")
         self.assertNotEqual(cmd, "Command not found")
         
@@ -85,7 +87,6 @@ class TestFunctional(unittest.TestCase):
         cmd = madvr.send_command("KeyPress, MENU")
         self.assertNotEqual(cmd, "Command not found")
 
-        print("running test_z_ConnClose")
         madvr.close_connection()
         self.assertEqual(True, madvr.is_closed)
 
