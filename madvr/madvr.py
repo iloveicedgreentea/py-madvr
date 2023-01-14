@@ -379,6 +379,10 @@ class Madvr:
         """
         Poll the status for attributes and write them to state
         """
+        # If its locked, return
+        if not self._lock.acquire(blocking=False): # pylint: disable=consider-using-with
+            return
+
         # lock so HA doesn't trip over itself
         with self._lock:
             try:
