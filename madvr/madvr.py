@@ -406,28 +406,31 @@ class Madvr:
         Process arbitrary stream of notifications and set them as instance attr
         """
         self.logger.debug("Processing data for %s", input_data)
+        try:
+            if isinstance(input_data, bytes):
+                # This pattern will be able to extract from the byte encoded stream
+                pattern = r"([A-Z][^\r\n]*)\r\n"
+                groups = re.findall(pattern, input_data.decode())
+                # split the groups, the first element is the key, remove the key from the values
+                # for each match in groups, add it to dict
+                # {"key": ["val1", "val2"]}
+                val_dict: dict = {
+                    group.split()[0]: group.replace(group.split()[0] + " ", "").split()
+                    for group in groups
+                }
+                self.logger.debug("groups: %s", groups)
+            else:
+                self.logger.debug("input data: %s", input_data)
+                # This pattern extracts from a regular string
+                # If we have a str its assumed we are dealing with one output stream
+                pattern = r"([A-Z][A-Za-z]*)\s(.*)"
+                match = re.search(pattern, input_data)
+                val_dict: dict = {match.group(1): match.group(2).split()}
 
-        if isinstance(input_data, bytes):
-            # This pattern will be able to extract from the byte encoded stream
-            pattern = r"([A-Z][^\r\n]*)\r\n"
-            groups = re.findall(pattern, input_data.decode())
-            # split the groups, the first element is the key, remove the key from the values
-            # for each match in groups, add it to dict
-            # {"key": ["val1", "val2"]}
-            val_dict: dict = {
-                group.split()[0]: group.replace(group.split()[0] + " ", "").split()
-                for group in groups
-            }
-            self.logger.debug("groups: %s", groups)
-        else:
-            # This pattern extracts from a regular string
-            # If we have a str its assumed we are dealing with one output stream
-            pattern = r"([A-Z][A-Za-z]*)\s(.*)"
-            match = re.search(pattern, input_data)
-            val_dict: dict = {match.group(1): match.group(2).split()}
-
-        self.logger.debug("val dict: %s", val_dict)
-
+            self.logger.debug("val dict: %s", val_dict)
+        except AttributeError:
+            return
+            
         # Map values to attr
         incoming_signal_info: list = val_dict.get("IncomingSignalInfo", [])
         if incoming_signal_info:
