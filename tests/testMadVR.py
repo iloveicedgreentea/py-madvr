@@ -59,9 +59,7 @@ class TestFunctional(unittest.TestCase):
         madvr.poll_status()
         self.assertNotEqual(madvr.incoming_res, "")
         self.assertNotEqual(madvr.outgoing_color_space, "")
-        
-        self.assertEqual(madvr.hdr_flag, True)
-        self.skipTest("")
+    
 
         signal = madvr.send_command("GetAspectRatio")
         self.assertNotEqual(signal, "Command not found")

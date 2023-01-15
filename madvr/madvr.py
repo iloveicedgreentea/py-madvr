@@ -175,36 +175,63 @@ class Madvr:
 
         Raises HeartBeatError exception
         """
+        i = 0
+        while i < 3:
+            # confirm can send heartbeat, ready for commands
+            self.logger.debug("Sending heartbeats")
 
-        # confirm can send heartbeat, ready for commands
-        self.logger.debug("Sending heartbeats")
+            self.client.send(self.HEARTBEAT)
 
-        self.client.send(self.HEARTBEAT)
+            # read all to clear buffer
+            ack_reply = self.client.recv(self.read_limit)
 
-        # read all to clear buffer
-        ack_reply = self.client.recv(self.read_limit)
+            if ACKs.reply.value not in ack_reply:
+                # try clearing buffer
+                try:
+                    self.client.recv(self.read_limit)
 
-        if ACKs.reply.value not in ack_reply:
-            raise HeartBeatError(f"{ack_reply} did not contain {ACKs.reply.value}")
+                except (socket.timeout, socket.error):
+                    pass
 
-        # send heartbeat with notification and read ack and then regular client
-        # ensure both work one after the next
-        self.notification_client.send(self.HEARTBEAT)
+                i += 1
+                continue
 
-        ack_reply = self.notification_client.recv(self.read_limit)
+            # send heartbeat with notification and read ack and then regular client
+            # ensure both work one after the next
+            self.notification_client.send(self.HEARTBEAT)
 
-        if ACKs.reply.value not in ack_reply:
-            raise HeartBeatError(f"{ack_reply} did not contain {ACKs.reply.value}")
+            ack_reply = self.notification_client.recv(self.read_limit)
 
-        # send again on regular client to make sure both clients work
-        self.client.send(self.HEARTBEAT)
+            if ACKs.reply.value not in ack_reply:
+                # try clearing buffer
+                try:
+                    self.notification_client.recv(self.read_limit)
 
-        ack_reply = self.client.recv(self.read_limit)
+                except (socket.timeout, socket.error):
+                    pass
+                i += 1
+                continue
 
-        if ACKs.reply.value not in ack_reply:
-            raise HeartBeatError(f"{ack_reply} did not contain {ACKs.reply.value}")
+            # send again on regular client to make sure both clients work
+            self.client.send(self.HEARTBEAT)
 
-        self.logger.debug("Handshakes complete")
+            ack_reply = self.client.recv(self.read_limit)
+
+            if ACKs.reply.value not in ack_reply:
+                # try clearing buffer
+                try:
+                    self.client.recv(self.read_limit)
+
+                except (socket.timeout, socket.error):
+                    pass
+                i += 1
+                continue
+
+            self.logger.debug("Handshakes complete")
+
+            return
+        
+        raise HeartBeatError(f"{ack_reply} did not contain {ACKs.reply.value}")
 
     def _construct_command(self, raw_command: str) -> tuple[bytes, bool, str]:
         """
@@ -405,6 +432,13 @@ class Madvr:
         """
         Process arbitrary stream of notifications and set them as instance attr
         """
+
+        # TODO:
+#         Error getting update: b'ResetTemporary\r\nNoSignal\r\nOutgoingSignalInfo 4096x2160 23.976p 2D RGB 8bit SDR 2020 TV\r\nIncomingSignalInfo 3840x2160 23.976p 2D 422 12bit HDR10 2020 TV 16:9\r\nAspectRatio 3840:2160 1.778 178 "16:9"\r\nMaskingRatio 4096:1716 2.387 239\r\nAspectRatio 3816:1623 2.351 235 "Scope"\r\nMaskingRatio 4035:1716 2.351 235\r\n' did not contain b'OK\r\n'
+# Error getting update: b'AspectRatio 3816:1623 2.351 235 "Scope"\r\nMaskingRatio 4035:1716 2.351 235\r\n' did not contain b'OK\r\n'
+# Error getting update: b'AspectRatio 2814:2011 1.399 137 "Academy Ratio"\r\nMaskingRatio 2401:1716 1.399 137\r\n' did not contain b'OK\r\n'
+# ACK not found in reply. Got: b'IncomingSignalInfo 3840x2160 23.976p 2D 422 12bit SDR 709 TV 16:9\r\n'
+# Error getting update: b'AspectRatio 3816:2146 1.778 178 "16:9"\r\n' did not contain b'OK\r\n'
         self.logger.debug("Processing data for %s", input_data)
         try:
             if isinstance(input_data, bytes):
