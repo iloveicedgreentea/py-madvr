@@ -430,7 +430,7 @@ class Madvr:
             self.logger.debug("val dict: %s", val_dict)
         except AttributeError:
             return
-            
+
         # Map values to attr
         incoming_signal_info: list = val_dict.get("IncomingSignalInfo", [])
         if incoming_signal_info:
@@ -464,7 +464,7 @@ class Madvr:
             self.outgoing_frame_rate = outgoing_signal_info[1]
             self.outgoing_color_space = outgoing_signal_info[3]
             self.outgoing_bit_depth = outgoing_signal_info[4]
-            self.hdr_flag = "HDR" in outgoing_signal_info[5]
+            self.outgoing_hdr_flag = "HDR" in outgoing_signal_info[5]
             self.outgoing_colorimetry = outgoing_signal_info[6]
             self.outgoing_black_levels = outgoing_signal_info[7]
 
