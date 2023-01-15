@@ -268,7 +268,6 @@ class Madvr:
         command: str - command to send like KeyPress, MENU
         Raises RetryExceededError
         """
-        self._cmd_running = False
         # Verify the command is supported
         try:
             cmd, is_info, enum_type = self._construct_command(command)
@@ -286,7 +285,6 @@ class Madvr:
             self._reconnect()
 
         while retry_count < 5:
-            self._cmd_running = True
             # Send the command
             self.client.send(cmd)
 
@@ -331,7 +329,6 @@ class Madvr:
                     # so polling isn't required
 
                     # process the output
-                    self._cmd_running = False
                     return self._process_info(res, enum_type["msg"].value)
                 
                 self._cmd_running = False
@@ -343,7 +340,6 @@ class Madvr:
                 continue
 
         # raise if we got here
-        self._cmd_running = False
         raise RetryExceededError("Retry count exceeded")
 
     def read_notifications(self, wait_forever: bool) -> None:
@@ -389,6 +385,7 @@ class Madvr:
             return
 
         try:
+            self._cmd_running = True
             # send heartbeat so it doesnt close our connection
             self._send_heartbeat()
             # Get incoming signal info
@@ -401,8 +398,10 @@ class Madvr:
                 res = self.send_command(cmd)
                 self.logger.debug("poll_status resp: %s", res)
                 self._process_notifications(res)
+            self._cmd_running = False
         except (socket.timeout, socket.error, HeartBeatError) as err:
             self.logger.error("Error getting update: %s", err)
+            self._cmd_running = False
 
     def _process_notifications(self, input_data: Union[bytes, str]) -> None:
         """
