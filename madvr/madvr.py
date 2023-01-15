@@ -259,7 +259,7 @@ class Madvr:
 
         return cmd, is_info.value, val
 
-    def _read_until_ok(self, client: socket.socket, max_retries=3) -> bool:
+    def _read_until_ok(self, client: socket.socket, max_retries=10) -> bool:
         """
         Read the buffer until we get ok or timeout
         """
@@ -268,7 +268,7 @@ class Madvr:
 
         max_tries = 0
         # exit loop if exceed maximum checks for ok or retries
-        while retry_count <= max_retries and max_tries < 10:
+        while retry_count <= max_retries and max_tries < 25:
             try:
                 data = client.recv(self.read_limit)
                 self.logger.debug("data found: %s", data)
