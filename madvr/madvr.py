@@ -181,30 +181,28 @@ class Madvr:
 
         self.client.send(self.HEARTBEAT)
 
-        # read first 4 bytes for ok\r\n
-        ack_reply = self.client.recv(4)
+        # read all to clear buffer
+        ack_reply = self.client.recv(self.read_limit)
 
-        if ack_reply != ACKs.reply.value:
-            raise HeartBeatError(f"{ack_reply} does not match {ACKs.reply.value}")
+        if ACKs.reply.value not in ack_reply:
+            raise HeartBeatError(f"{ack_reply} did not contain {ACKs.reply.value}")
 
         # send heartbeat with notification and read ack and then regular client
         # ensure both work one after the next
         self.notification_client.send(self.HEARTBEAT)
 
-        # read first 4 bytes for ok\r\n
-        ack_reply = self.notification_client.recv(4)
+        ack_reply = self.notification_client.recv(self.read_limit)
 
-        if ack_reply != ACKs.reply.value:
-            raise HeartBeatError(f"{ack_reply} does not match {ACKs.reply.value}")
+        if ACKs.reply.value not in ack_reply:
+            raise HeartBeatError(f"{ack_reply} did not contain {ACKs.reply.value}")
 
         # send again on regular client to make sure both clients work
         self.client.send(self.HEARTBEAT)
 
-        # read first 4 bytes for ok\r\n
-        ack_reply = self.client.recv(4)
+        ack_reply = self.client.recv(self.read_limit)
 
-        if ack_reply != ACKs.reply.value:
-            raise HeartBeatError(f"{ack_reply} does not match {ACKs.reply.value}")
+        if ACKs.reply.value not in ack_reply:
+            raise HeartBeatError(f"{ack_reply} did not contain {ACKs.reply.value}")
 
         self.logger.debug("Handshakes complete")
 
