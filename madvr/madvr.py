@@ -14,6 +14,7 @@ from madvr.errors import AckError, RetryExceededError, HeartBeatError
 class Madvr:
     """MadVR Control"""
 
+    # pylint: disable=too-many-instance-attributes
     def __init__(
         self,
         host: str,
@@ -67,11 +68,44 @@ class Madvr:
         self.command_read_timeout = 3
         self.logger.debug("Running in debug mode")
 
+    def _clear_attr(self) -> None:
+        """
+        Clear instance attr so HA doesn't report stale values
+        """
+        # Incoming attrs
+        self.incoming_res = ""
+        self.incoming_frame_rate = ""
+        self.incoming_color_space = ""
+        self.incoming_bit_depth = ""
+        self.hdr_flag = False
+        self.incoming_colorimetry = ""
+        self.incoming_black_levels = ""
+        self.incoming_aspect_ratio = ""
+        self.aspect_ratio = 0
+
+        # Temps
+        self.temp_gpu = 0
+        self.temp_hdmi = 0
+        self.temp_cpu = 0
+        self.temp_mainboard = 0
+
+        # Outgoing signal
+        self.outgoing_res = ""
+        self.outgoing_frame_rate = ""
+        self.outgoing_color_space = ""
+        self.outgoing_bit_depth = ""
+        self.outgoing_colorimetry = ""
+        self.outgoing_hdr_flag = False
+        self.outgoing_black_levels = ""
+
     def close_connection(self) -> None:
         """close the connection"""
         self.client.close()
         self.notification_client.close()
         self.is_closed = True
+
+        # Clear attr
+        self._clear_attr()
 
     def open_connection(self) -> None:
         """Open a connection"""
@@ -89,6 +123,7 @@ class Madvr:
         Raises AckError
         """
         backoff = 0
+
         while True:
             # Dumb increasing backoff
             try:
@@ -133,6 +168,7 @@ class Madvr:
 
                 # handshake func
                 self._send_heartbeat()
+
                 self.logger.info("Connection established")
 
                 self.is_on = True
@@ -147,6 +183,7 @@ class Madvr:
                 backoff += 1
                 time.sleep(2 + backoff)
                 continue
+
             # includes conn refused
             # backoff to not spam HA
             except socket.timeout:
@@ -174,6 +211,7 @@ class Madvr:
         Raises HeartBeatError exception
         """
         i = 0
+
         while i < 3:
             # confirm can send heartbeat, ready for commands
             self.logger.debug("Sending heartbeats")
@@ -226,13 +264,13 @@ class Madvr:
             # key_press, menu
             command, raw_value = raw_command.split(",")
             value = raw_value.strip()
-            self.logger.debug("using command %s", command)
             self.logger.debug("using value %s", value)
+        # if valuerror it means theres just one command like PowerOff, so use that
         except ValueError:
-            self.logger.debug("Not able to split command")
             command = raw_command
             skip_val = True
-            self.logger.debug("using command %s", command)
+
+        self.logger.debug("using command %s", command)
 
         # Check if command is implemented
         if not hasattr(Commands, command):
@@ -240,10 +278,9 @@ class Madvr:
 
         # construct the command with nested Enums
         command_name, val, is_info = Commands[command].value
+
+        # if there is a value to process
         if not skip_val:
-            # self.logger.debug("command_name: %s", command_name)
-            # self.logger.debug("val: %s", val[value.lstrip(" ")].value)
-            # self.logger.debug("is info: %s", is_info.value)
             try:
                 command_base: bytes = command_name + b" " + val[value.lstrip(" ")].value
                 # Construct command based on required values
@@ -259,33 +296,28 @@ class Madvr:
 
         return cmd, is_info.value, val
 
-    def _read_until_ok(self, client: socket.socket, max_retries=10) -> bool:
+    def _read_until_ok(self, client: socket.socket) -> bool:
         """
-        Read the buffer until we get ok or timeout
+        Read the buffer until we get ok or timeout because a timeout means no more to read
         """
-        # TODO: use this for all ack recv methods
-        retry_count = 0
-
-        max_tries = 0
+        counter = 0
         # exit loop if exceed maximum checks for ok or retries
-        while retry_count <= max_retries and max_tries < 25:
+        while True:
             try:
                 data = client.recv(self.read_limit)
-                self.logger.debug("data found: %s", data)
+                self.logger.debug("_read_until_ok: data found: %s", data)
+
                 if ACKs.reply.value not in data:
-                    self.logger.debug("OK not found yet")
-                    max_tries += 1
+                    self.logger.debug("OK not found yet counter: %s", counter)
+                    counter += 1
                     continue
 
-                self.logger.debug("OK found in data")
+                self.logger.debug("OK found counter: %s", counter)
                 return True
 
             except (socket.timeout, socket.error):
-                self.logger.debug("Timeout reading ack")
-                retry_count += 1
-                continue
-
-        return False
+                self.logger.debug("Timeout reading ack with counter: %s", counter)
+                return False
 
     def send_command(self, command: str) -> str:
         """
@@ -299,35 +331,36 @@ class Madvr:
         try:
             cmd, is_info, enum_type = self._construct_command(command)
         except NotImplementedError:
-            return "Command not found"
+            return f"Command not found: {command}"
 
         self.logger.debug("using values: %s %s %s", cmd, is_info, enum_type)
-
-        # simple retry logic
-        retry_count = 0
 
         # reconnect if client is not init or its off
         if self.client is None or self.is_on is False:
             self.logger.debug("Connection lost - restarting connection")
             self._reconnect()
 
+        # simple retry logic
+        retry_count = 0
+
         while retry_count < 5:
             # Send the command
-            self.client.send(cmd)
-
             try:
+                self.client.send(cmd)
+
                 if not self._read_until_ok(self.client):
-                    self.logger.error("ACK not found in reply, retrying")
+                    self.logger.error("OK not found when reading response, retrying")
                     retry_count += 1
                     continue
 
             except socket.timeout:
-                self.logger.debug("Ack receipt timed out, retrying")
+                self.logger.debug("OK receipt timed out, retrying")
                 retry_count += 1
                 continue
+
             # should catch connection is closed
             except OSError:
-                self.logger.warning("Connection failed, retrying")
+                self.logger.warning("OK connection failed, retrying")
                 retry_count += 1
                 continue
 
@@ -352,8 +385,11 @@ class Madvr:
                 retry_count += 1
                 continue
 
-        # raise if we got here
-        raise RetryExceededError("Retry count exceeded")
+        # if we got here something went wrong
+        self.close_connection()
+        self._reconnect()
+
+        return ""
 
     def read_notifications(self, wait_forever: bool) -> None:
         """

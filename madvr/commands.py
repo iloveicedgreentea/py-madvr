@@ -80,7 +80,6 @@ class Toggle(Enum):
 
 class SingleCmd(Enum):
     """for things that are single words"""
-    pass
 
 class IsInformational(Enum):
     true = True
