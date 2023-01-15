@@ -6,7 +6,6 @@ import logging
 from typing import Final, Union
 import re
 import time
-import threading
 import socket
 from madvr.commands import ACKs, Footer, Commands, Enum, Connections
 from madvr.errors import AckError, RetryExceededError, HeartBeatError
@@ -27,7 +26,6 @@ class Madvr:
         self.port = port
         self.connect_timeout: int = connect_timeout
         self.logger = logger
-        self._cmd_running = False
 
         # Const values
         self.MADVR_OK: Final = Connections.welcome.value
@@ -98,7 +96,7 @@ class Madvr:
 
                 # Command client
                 self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.client.settimeout(10)
+                self.client.settimeout(self.command_read_timeout)
                 self.client.connect((self.host, self.port))
 
                 # Notifications client
@@ -182,17 +180,8 @@ class Madvr:
 
             self.client.send(self.HEARTBEAT)
 
-            # read all to clear buffer
-            ack_reply = self.client.recv(self.read_limit)
-
-            if ACKs.reply.value not in ack_reply:
-                # try clearing buffer
-                try:
-                    self.client.recv(self.read_limit)
-
-                except (socket.timeout, socket.error):
-                    pass
-
+            # Recv until we find ok or timeout
+            if not self._read_until_ok(self.client):
                 i += 1
                 continue
 
@@ -200,38 +189,22 @@ class Madvr:
             # ensure both work one after the next
             self.notification_client.send(self.HEARTBEAT)
 
-            ack_reply = self.notification_client.recv(self.read_limit)
-
-            if ACKs.reply.value not in ack_reply:
-                # try clearing buffer
-                try:
-                    self.notification_client.recv(self.read_limit)
-
-                except (socket.timeout, socket.error):
-                    pass
+            if not self._read_until_ok(self.notification_client):
                 i += 1
                 continue
 
             # send again on regular client to make sure both clients work
             self.client.send(self.HEARTBEAT)
 
-            ack_reply = self.client.recv(self.read_limit)
-
-            if ACKs.reply.value not in ack_reply:
-                # try clearing buffer
-                try:
-                    self.client.recv(self.read_limit)
-
-                except (socket.timeout, socket.error):
-                    pass
+            if not self._read_until_ok(self.client):
                 i += 1
                 continue
 
             self.logger.debug("Handshakes complete")
 
             return
-        
-        raise HeartBeatError(f"{ack_reply} did not contain {ACKs.reply.value}")
+
+        raise HeartBeatError("Sending heartbeat fatal error")
 
     def _construct_command(self, raw_command: str) -> tuple[bytes, bool, str]:
         """
@@ -286,6 +259,34 @@ class Madvr:
 
         return cmd, is_info.value, val
 
+    def _read_until_ok(self, client: socket.socket, max_retries=3) -> bool:
+        """
+        Read the buffer until we get ok or timeout
+        """
+        # TODO: use this for all ack recv methods
+        retry_count = 0
+
+        max_tries = 0
+        # exit loop if exceed maximum checks for ok or retries
+        while retry_count <= max_retries and max_tries < 10:
+            try:
+                data = client.recv(self.read_limit)
+                self.logger.debug("data found: %s", data)
+                if ACKs.reply.value not in data:
+                    self.logger.debug("OK not found yet")
+                    max_tries += 1
+                    continue
+
+                self.logger.debug("OK found in data")
+                return True
+
+            except (socket.timeout, socket.error):
+                self.logger.debug("Timeout reading ack")
+                retry_count += 1
+                continue
+
+        return False
+
     def send_command(self, command: str) -> str:
         """
         send a given command same as the official madvr ones
@@ -293,6 +294,7 @@ class Madvr:
         command: str - command to send like KeyPress, MENU
         Raises RetryExceededError
         """
+
         # Verify the command is supported
         try:
             cmd, is_info, enum_type = self._construct_command(command)
@@ -314,21 +316,8 @@ class Madvr:
             self.client.send(cmd)
 
             try:
-                # Read everything because it can randomly include notifications ugh
-                ack_reply = self.client.recv(self.read_limit)
-                self.logger.debug("Got ack from cmd: %s", ack_reply)
-                # Don't read more if its informational
-                if not is_info:
-                    # envy replies with the same command for non-info we need to read to clear the buffer
-                    # else will ruin next commands
-                    cmd_mirror_reply = self.client.recv(self.read_limit)
-                    self.logger.debug("Got mirror_reply from cmd: %s", cmd_mirror_reply)
-
-                # envy can send anything at any time, not very robust API
-                # see if OK is contained in what we read
-                if ACKs.reply.value not in ack_reply:
-                    self.logger.error("ACK not found in reply. Got: %s", ack_reply)
-                    self.logger.debug("retrying")
+                if not self._read_until_ok(self.client):
+                    self.logger.error("ACK not found in reply, retrying")
                     retry_count += 1
                     continue
 
@@ -355,8 +344,7 @@ class Madvr:
 
                     # process the output
                     return self._process_info(res, enum_type["msg"].value)
-                
-                self._cmd_running = False
+
                 return ""
 
             except socket.timeout:
@@ -404,13 +392,7 @@ class Madvr:
         """
         Poll the status for attributes and write them to state
         """
-
-        # dont run this multiple times as HA loves doing
-        if self._cmd_running:
-            return
-
         try:
-            self._cmd_running = True
             # send heartbeat so it doesnt close our connection
             self._send_heartbeat()
             # Get incoming signal info
@@ -423,22 +405,14 @@ class Madvr:
                 res = self.send_command(cmd)
                 self.logger.debug("poll_status resp: %s", res)
                 self._process_notifications(res)
-            self._cmd_running = False
         except (socket.timeout, socket.error, HeartBeatError) as err:
             self.logger.error("Error getting update: %s", err)
-            self._cmd_running = False
 
     def _process_notifications(self, input_data: Union[bytes, str]) -> None:
         """
         Process arbitrary stream of notifications and set them as instance attr
         """
 
-        # TODO:
-#         Error getting update: b'ResetTemporary\r\nNoSignal\r\nOutgoingSignalInfo 4096x2160 23.976p 2D RGB 8bit SDR 2020 TV\r\nIncomingSignalInfo 3840x2160 23.976p 2D 422 12bit HDR10 2020 TV 16:9\r\nAspectRatio 3840:2160 1.778 178 "16:9"\r\nMaskingRatio 4096:1716 2.387 239\r\nAspectRatio 3816:1623 2.351 235 "Scope"\r\nMaskingRatio 4035:1716 2.351 235\r\n' did not contain b'OK\r\n'
-# Error getting update: b'AspectRatio 3816:1623 2.351 235 "Scope"\r\nMaskingRatio 4035:1716 2.351 235\r\n' did not contain b'OK\r\n'
-# Error getting update: b'AspectRatio 2814:2011 1.399 137 "Academy Ratio"\r\nMaskingRatio 2401:1716 1.399 137\r\n' did not contain b'OK\r\n'
-# ACK not found in reply. Got: b'IncomingSignalInfo 3840x2160 23.976p 2D 422 12bit SDR 709 TV 16:9\r\n'
-# Error getting update: b'AspectRatio 3816:2146 1.778 178 "16:9"\r\n' did not contain b'OK\r\n'
         self.logger.debug("Processing data for %s", input_data)
         try:
             if isinstance(input_data, bytes):
