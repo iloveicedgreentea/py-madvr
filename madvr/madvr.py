@@ -100,8 +100,18 @@ class Madvr:
 
     def close_connection(self) -> None:
         """close the connection"""
-        self.client.close()
-        self.notification_client.close()
+        try:
+            self.client.close()
+        except AttributeError:
+            # means its already closed
+            pass
+        
+        try:
+            self.notification_client.close()
+        except AttributeError:
+            # means its already closed
+            pass
+
         self.is_closed = True
 
         # Clear attr
