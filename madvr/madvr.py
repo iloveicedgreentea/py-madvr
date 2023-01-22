@@ -112,6 +112,9 @@ class Madvr:
             # means its already closed
             pass
 
+        self.client = None
+        self.notification_client = None
+
         self.is_closed = True
 
         # Clear attr
@@ -347,6 +350,9 @@ class Madvr:
 
         # reconnect if client is not init or its off
         if self.client is None or self.is_on is False:
+            # Don't reconnect if poweroff or standby because HA will complain
+            if "PowerOff" in command or "Standby" in command:
+                return ""
             self.logger.debug("Connection lost - restarting connection")
             self._reconnect()
 
@@ -530,6 +536,8 @@ class Madvr:
 
         standby: bool -> standby instead of poweroff if true
         """
+        # dont do anything if its off besides mark it off
+        # sending command will open connection
         try:
             res = self.send_command("Standby" if standby else "PowerOff")
             self.close_connection()
