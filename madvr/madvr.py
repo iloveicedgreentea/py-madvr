@@ -135,10 +135,8 @@ class Madvr:
 
         Raises AckError
         """
-        backoff = 0
 
         while True:
-            # Dumb increasing backoff
             try:
                 self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
 
@@ -191,28 +189,25 @@ class Madvr:
 
             except HeartBeatError:
                 self.logger.warning(
-                    "Error sending heartbeat, retrying in %s seconds", 2 + backoff
+                    "Error sending heartbeat, retrying in %s seconds", 2
                 )
-                backoff += 1
-                time.sleep(2 + backoff)
+                time.sleep(2)
                 continue
 
             # includes conn refused
             # backoff to not spam HA
             except socket.timeout:
                 self.logger.warning(
-                    "Connecting timeout, retrying in %s seconds", 2 + backoff
+                    "Connecting timeout, retrying in %s seconds", 2
                 )
-                backoff += 1
-                time.sleep(2 + backoff)
+                time.sleep(2)
                 continue
             except OSError as err:
                 self.logger.warning(
-                    "Connecting failed, retrying in %s seconds", 2 + backoff
+                    "Connecting failed, retrying in %s seconds", 2
                 )
                 self.logger.debug(err)
-                backoff += 1
-                time.sleep(2 + backoff)
+                time.sleep(2)
                 continue
 
     def _send_heartbeat(self) -> None:
@@ -365,7 +360,7 @@ class Madvr:
                 self.client.send(cmd)
 
                 if not self._read_until_ok(self.client):
-                    self.logger.error("OK not found when reading response, retrying")
+                    self.logger.debug("OK not found when reading response, retrying")
                     retry_count += 1
                     continue
 
@@ -376,7 +371,7 @@ class Madvr:
 
             # should catch connection is closed
             except OSError:
-                self.logger.warning("OK connection failed, retrying")
+                self.logger.warning("connection failed when reading OK, retrying")
                 retry_count += 1
                 continue
 
