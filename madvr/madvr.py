@@ -252,7 +252,7 @@ class Madvr:
 
         raise HeartBeatError("Sending heartbeat fatal error")
 
-    def _construct_command(self, raw_command: str) -> tuple[bytes, bool, str]:
+    def _construct_command(self, raw_command: Union[str, list]) -> tuple[bytes, bool, str]:
         """
         Transform commands into their byte values from the string value
 
@@ -263,20 +263,32 @@ class Madvr:
             bool: if its informational
             str: the 'msg' field in the Enum used to filter notifications
         """
-        # split command into the base and the action like menu: left
         self.logger.debug("raw_command: %s", raw_command)
         skip_val = False
+        # HA seems to always send commands as a list even if you set them as a str
 
         # This lets you use single cmds or something with val like KEYPRESS
-        try:
-            # key_press, menu
-            command, raw_value = raw_command.split(",")
-            value = raw_value.strip()
-            self.logger.debug("using value %s", value)
-        # if valuerror it means theres just one command like PowerOff, so use that
-        except ValueError:
-            command = raw_command
-            skip_val = True
+        # If len is 1, then try to split, otherwise its just one word
+        if len(raw_command) == 1:
+            try:
+                # ['key_press, menu']
+                command, raw_value = raw_command[0].split(",")
+                # remove space
+                value = raw_value.strip()
+                self.logger.debug("using command %s and value %s", command, value)
+            # if valuerror it means theres just one command like PowerOff, so use that directly
+            except ValueError:
+                command = raw_command
+                skip_val = True
+        # if there are more than two values, this is incorrect, error
+        elif len(raw_command) > 2:
+            self.logger.error("More than two command values provided. Envy does not have more than 2 command values e.g KeyPress MENU")
+            raise NotImplementedError(f"Too many values provided {raw_command}")
+        else:
+            # else a command was provided as a proper list ['keypress', 'menu']
+            # raw command will be a list of 2
+            command, value = raw_command
+
 
         self.logger.debug("using command %s", command)
 
@@ -327,7 +339,7 @@ class Madvr:
                 self.logger.debug("Timeout reading ack with counter: %s", counter)
                 return False
 
-    def send_command(self, command: str) -> str:
+    def send_command(self, command: Union[str, list]) -> str:
         """
         send a given command same as the official madvr ones
 
