@@ -264,6 +264,7 @@ class Madvr:
             str: the 'msg' field in the Enum used to filter notifications
         """
         self.logger.debug("raw_command: %s", raw_command)
+        self.logger.debug("raw_command length: %s", len(raw_command))
         skip_val = False
         # HA seems to always send commands as a list even if you set them as a str
 
@@ -277,7 +278,9 @@ class Madvr:
                 value = raw_value.strip()
                 self.logger.debug("using command %s and value %s", command, value)
             # if valuerror it means theres just one command like PowerOff, so use that directly
-            except ValueError:
+            except ValueError as err:
+                self.logger.debug(err)
+                self.logger.debug("Using raw_command directly")
                 command = raw_command
                 skip_val = True
         # if there are more than two values, this is incorrect, error
