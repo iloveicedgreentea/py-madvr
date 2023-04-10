@@ -399,7 +399,9 @@ class Madvr:
         Listen for notifications. Meant to run as a background task
         wait_forever: bool -> if true, it will block forever. False useful for testing
         """
-        # Is there a way for HA to always poll in background?z
+        # reconnect if client is not init or its off
+        if self.client is None or self.is_on is False:
+            self._reconnect()
 
         # Receive data in a loop
         i = 0
@@ -425,6 +427,8 @@ class Madvr:
                 self.logger.debug("Connection error")
                 self.notification_client.sendall(self.HEARTBEAT)
                 continue
+            except AttributeError:
+                self._reconnect()
 
     def _process_notifications(self, input_data: Union[bytes, str]) -> None:
         """
