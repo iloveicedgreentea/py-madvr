@@ -6,7 +6,6 @@ import logging
 from typing import Final, Union
 import re
 import time
-import socket
 import asyncio
 from madvr.commands import ACKs, Footer, Commands, Enum, Connections
 from madvr.errors import AckError, RetryExceededError, HeartBeatError
@@ -60,8 +59,11 @@ class Madvr:
         self.outgoing_black_levels = ""
 
         # Sockets
-        self.client = None
-        self.notification_client = None
+        self.reader = None
+        self.writer = None
+        
+        self.notification_reader = None
+        self.notification_writer = None
         self.is_closed = False
         # Envy does not have an are you on cmd, just assuming its on based on active connection
         self.is_on = False
@@ -102,21 +104,21 @@ class Madvr:
     async def close_connection(self) -> None:
         """close the connection"""
         try:
-            self.client[1].close()
-            await self.client[1].wait_closed()
+            self.writer.close()
+            await self.writer.wait_closed()
         except AttributeError:
             # means its already closed
             pass
 
         try:
-            self.notification_client[1].close()
-            await self.client[1].wait_closed()
+            self.notification_writer.close()
+            await self.writer.wait_closed()
         except AttributeError:
             # means its already closed
             pass
 
-        self.client = None
-        self.notification_client = None
+        self.reader = None
+        self.notification_reader = None
 
         self.is_closed = True
 
@@ -144,16 +146,13 @@ class Madvr:
                 self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
 
                 # Command client
-                self.client = await asyncio.wait_for(
+                self.reader, self.writer = await asyncio.wait_for(
                     asyncio.open_connection(self.host, self.port),
                     timeout=self.command_read_timeout,
                 )
-                # self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                # self.client.settimeout(self.command_read_timeout)
-                # self.client.connect((self.host, self.port))
 
                 # Notifications client
-                self.notification_client = await asyncio.wait_for(
+                self.notification_reader, self.notification_writer= await asyncio.wait_for(
                     asyncio.open_connection(self.host, self.port), timeout=20
                 )
 
@@ -162,7 +161,7 @@ class Madvr:
 
                 # Make sure first message says WELCOME
                 msg_envy = await asyncio.wait_for(
-                    self.client.readline(), timeout=10,
+                    self.reader.readline(), timeout=10,
                 )
 
                 # Check if first 7 char match
@@ -174,7 +173,7 @@ class Madvr:
 
                 # Make sure first message says WELCOME for notifications
                 msg_envy = await asyncio.wait_for(
-                    self.notification_client.readline(), timeout=20
+                    self.notification_reader.readline(), timeout=20
                 )
 
                 # Check if first 7 char match
@@ -222,7 +221,7 @@ class Madvr:
         """
         Send a heartbeat to keep connection open
 
-        You should wrap this in try with socket.error and socket.timeout exceptions
+        You should wrap this in try with OSError and asyncio.TimeoutError exceptions
 
         Raises HeartBeatError exception
         """
@@ -232,28 +231,28 @@ class Madvr:
             # confirm can send heartbeat, ready for commands
             self.logger.debug("Sending heartbeats")
 
-            self.client[1].write(self.HEARTBEAT)
-            await self.client[1].drain()
+            self.writer.write(self.HEARTBEAT)
+            await self.writer.drain()
 
             # Recv until we find ok or timeout
-            if not await self._read_until_ok(self.client[0]):
+            if not await self._read_until_ok(self.reader):
                 i += 1
                 continue
 
             # send heartbeat with notification and read ack and then regular client
             # ensure both work one after the next
-            self.notification_client[1].write(self.HEARTBEAT)
-            await self.notification_client[1].drain()
+            self.notification_writer.write(self.HEARTBEAT)
+            await self.notification_writer.drain()
 
-            if not await self._read_until_ok(self.notification_client[0]):
+            if not await self._read_until_ok(self.notification_reader):
                 i += 1
                 continue
 
             # send again on regular client to make sure both clients work
-            self.client[1].write(self.HEARTBEAT)
-            await self.client[1].drain()
+            self.writer.write(self.HEARTBEAT)
+            await self.writer.drain()
 
-            if not await self._read_until_ok(self.client[0]):
+            if not await self._read_until_ok(self.reader):
                 i += 1
                 continue
 
@@ -351,7 +350,7 @@ class Madvr:
                 self.logger.debug("OK found counter: %s", counter)
                 return True
 
-            except (socket.timeout, socket.error):
+            except asyncio.TimeoutError:
                 self.logger.debug("Timeout reading ack with counter: %s", counter)
                 return False
 
@@ -373,7 +372,7 @@ class Madvr:
         self.logger.debug("using values: %s %s", cmd, enum_type)
 
         # reconnect if client is not init or its off
-        if self.client is None or self.is_on is False:
+        if self.reader is None or self.is_on is False:
             # Don't reconnect if poweroff or standby because HA will complain
             if "PowerOff" in command or "Standby" in command:
                 return ""
@@ -386,10 +385,10 @@ class Madvr:
         while retry_count < 5:
             # Send the command
             try:
-                self.client[1].write(cmd)
-                await self.client[1].drain()
+                self.writer.write(cmd)
+                await self.writer.drain()
 
-            except socket.timeout:
+            except asyncio.TimeoutError:
                 self.logger.debug("OK receipt timed out, retrying")
                 retry_count += 1
                 continue
@@ -414,7 +413,7 @@ class Madvr:
         wait_forever: bool -> if true, it will block forever. False useful for testing
         """
         # reconnect if client is not init or its off
-        if self.client is None or self.is_on is False:
+        if self.notification_reader is None or self.is_on is False:
             await self._reconnect()
 
         # Receive data in a loop
@@ -422,9 +421,9 @@ class Madvr:
         while wait_forever or i < 5:
             try:
                 # send hearbeat
-                self.notification_client[1].write(self.HEARTBEAT)
-                await self.notification_client[1].drain()
-                data = self.notification_client.readline()
+                self.notification_writer.write(self.HEARTBEAT)
+                await self.notification_writer.drain()
+                data = self.notification_reader.readline()
                 time.sleep(1)
 
                 i += 1
@@ -435,18 +434,18 @@ class Madvr:
                 else:
                     # just wait forever for data
                     # send heartbeat keep conn open
-                    self.notification_client[1].write(self.HEARTBEAT)
-                    await self.notification_client[1].drain()
+                    self.notification_writer.write(self.HEARTBEAT)
+                    await self.notification_writer.drain()
                     continue
-            except socket.timeout:
+            except asyncio.TimeoutError:
                 self.logger.debug("Connection timed out")
-                self.notification_client[1].write(self.HEARTBEAT)
-                await self.notification_client[1].drain()
+                self.notification_writer.write(self.HEARTBEAT)
+                await self.notification_writer.drain()
                 continue
-            except socket.error:
+            except OSError:
                 self.logger.debug("Connection error")
-                self.notification_client[1].write(self.HEARTBEAT)
-                await self.notification_client[1].drain()
+                self.notification_writer.write(self.HEARTBEAT)
+                await self.notification_writer.drain()
                 continue
             except AttributeError:
                 self._reconnect()
