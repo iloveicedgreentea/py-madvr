@@ -105,7 +105,7 @@ class Madvr:
         except AttributeError:
             # means its already closed
             pass
-        
+
         try:
             self.notification_client.close()
         except AttributeError:
@@ -197,15 +197,11 @@ class Madvr:
             # includes conn refused
             # backoff to not spam HA
             except socket.timeout:
-                self.logger.warning(
-                    "Connecting timeout, retrying in %s seconds", 2
-                )
+                self.logger.warning("Connecting timeout, retrying in %s seconds", 2)
                 time.sleep(2)
                 continue
             except OSError as err:
-                self.logger.warning(
-                    "Connecting failed, retrying in %s seconds", 2
-                )
+                self.logger.warning("Connecting failed, retrying in %s seconds", 2)
                 self.logger.debug(err)
                 time.sleep(2)
                 continue
@@ -252,7 +248,7 @@ class Madvr:
 
         raise HeartBeatError("Sending heartbeat fatal error")
 
-    def _construct_command(self, raw_command: Union[str, list]) -> tuple[bytes, bool, str]:
+    def _construct_command(self, raw_command: Union[str, list]) -> tuple[bytes, str]:
         """
         Transform commands into their byte values from the string value
 
@@ -260,7 +256,6 @@ class Madvr:
 
         Return:
             bytes: the value to send in bytes
-            bool: if its informational
             str: the 'msg' field in the Enum used to filter notifications
         """
         self.logger.debug("raw_command: %s", raw_command)
@@ -285,13 +280,14 @@ class Madvr:
                 skip_val = True
         # if there are more than two values, this is incorrect, error
         elif len(raw_command) > 2:
-            self.logger.error("More than two command values provided. Envy does not have more than 2 command values e.g KeyPress MENU")
+            self.logger.error(
+                "More than two command values provided. Envy does not have more than 2 command values e.g KeyPress MENU"
+            )
             raise NotImplementedError(f"Too many values provided {raw_command}")
         else:
             # else a command was provided as a proper list ['keypress', 'menu']
             # raw command will be a list of 2
             command, value = raw_command
-
 
         self.logger.debug("using command %s", command)
 
@@ -300,7 +296,7 @@ class Madvr:
             raise NotImplementedError(f"Command not implemented: {command}")
 
         # construct the command with nested Enums
-        command_name, val, is_info = Commands[command].value
+        command_name, val, _ = Commands[command].value
 
         # if there is a value to process
         if not skip_val:
@@ -317,7 +313,7 @@ class Madvr:
 
         self.logger.debug("constructed command: %s", cmd)
 
-        return cmd, is_info.value, val
+        return cmd, val
 
     def _read_until_ok(self, client: socket.socket) -> bool:
         """
@@ -345,6 +341,7 @@ class Madvr:
     def send_command(self, command: Union[str, list]) -> str:
         """
         send a given command same as the official madvr ones
+        To keep this simple, just send the command without reading response
 
         command: str - command to send like KeyPress, MENU
         Raises RetryExceededError
@@ -352,11 +349,11 @@ class Madvr:
 
         # Verify the command is supported
         try:
-            cmd, is_info, enum_type = self._construct_command(command)
+            cmd, enum_type = self._construct_command(command)
         except NotImplementedError:
             return f"Command not found: {command}"
 
-        self.logger.debug("using values: %s %s %s", cmd, is_info, enum_type)
+        self.logger.debug("using values: %s %s", cmd, enum_type)
 
         # reconnect if client is not init or its off
         if self.client is None or self.is_on is False:
@@ -373,11 +370,10 @@ class Madvr:
             # Send the command
             try:
                 self.client.send(cmd)
-
-                if not self._read_until_ok(self.client):
-                    self.logger.debug("OK not found when reading response, retrying")
-                    retry_count += 1
-                    continue
+                # if not self._read_until_ok(self.client):
+                #     self.logger.debug("OK not found when reading response, retrying")
+                #     retry_count += 1
+                #     continue
 
             except socket.timeout:
                 self.logger.debug("OK receipt timed out, retrying")
@@ -390,26 +386,7 @@ class Madvr:
                 retry_count += 1
                 continue
 
-            # If its an info, get the rest of the info
-            try:
-                if is_info:
-                    # read response
-                    res = self.client.recv(self.read_limit)
-                    self.logger.debug("Response from info: %s", res)
-
-                    # TODO one day: whatever is not part of our command, write that to attr
-                    # e.g if we ask signal, and get notification for aspect, detect it and write that
-                    # so polling isn't required
-
-                    # process the output
-                    return self._process_info(res, enum_type["msg"].value)
-
-                return ""
-
-            except socket.timeout:
-                self.logger.debug("Ack receipt timed out, retrying")
-                retry_count += 1
-                continue
+            return ""
 
         # if we got here something went wrong
         self.close_connection()
@@ -417,12 +394,11 @@ class Madvr:
 
         return ""
 
-    def read_notifications(self, wait_forever: bool) -> None:
+    def start_read_notifications(self, wait_forever: bool) -> None:
         """
         Listen for notifications. Meant to run as a background task
         wait_forever: bool -> if true, it will block forever. False useful for testing
         """
-        # TODO: should this be a second integration?
         # Is there a way for HA to always poll in background?z
 
         # Receive data in a loop
@@ -450,31 +426,11 @@ class Madvr:
                 self.notification_client.sendall(self.HEARTBEAT)
                 continue
 
-    def poll_status(self) -> None:
-        """
-        Poll the status for attributes and write them to state
-        """
-        try:
-            # send heartbeat so it doesnt close our connection
-            self._send_heartbeat()
-            # Get incoming signal info
-            for cmd in [
-                "GetIncomingSignalInfo",
-                "GetAspectRatio",
-                "GetTemperatures",
-                "GetOutgoingSignalInfo",
-            ]:
-                res = self.send_command(cmd)
-                self.logger.debug("poll_status resp: %s", res)
-                self._process_notifications(res)
-        except (socket.timeout, socket.error, HeartBeatError) as err:
-            self.logger.error("Error getting update: %s", err)
-
     def _process_notifications(self, input_data: Union[bytes, str]) -> None:
         """
         Process arbitrary stream of notifications and set them as instance attr
         """
-
+        # This code constructs a dict for all values processed
         self.logger.debug("Processing data for %s", input_data)
         try:
             if isinstance(input_data, bytes):
@@ -557,24 +513,6 @@ class Madvr:
 
         except RetryExceededError:
             return "Retries Exceeded"
-
-    def _process_info(self, input_data: bytes, filter_str: str) -> str:
-        """
-        Process info given input and a filter str to only return the thing we want
-        e.g for IncomingSignalInfo
-        b"Ok\r\nIncomingSignalInfo 3840x2160 23.976p 2D 422
-        10bit HDR10 2020 TV 16:9\r\nAspect Ratio ETC ETC\r\n"
-        turns into -> IncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9
-
-        This is used by _process_notifications to turn it into a dict, add to instance attr
-        """
-
-        lines = input_data.decode().split("\r\n")
-        for line in lines:
-            if filter_str in line:
-                return line
-
-        return ""
 
     def print_commands(self) -> str:
         """
