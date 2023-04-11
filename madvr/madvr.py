@@ -5,7 +5,6 @@ Implements the MadVR protocol
 import logging
 from typing import Final, Union
 import re
-import time
 import asyncio
 from madvr.commands import ACKs, Footer, Commands, Enum, Connections
 from madvr.errors import AckError, RetryExceededError, HeartBeatError
@@ -422,19 +421,27 @@ class Madvr:
         Listen for notifications. Meant to run as a background task
         wait_forever: bool -> if true, it will block forever. False useful for testing
         """
-        # reconnect if client is not init or its off
-        if self.notification_reader is None or self.is_on is False:
-            await self._reconnect()
 
         # Receive data in a loop
         i = 0
         while wait_forever or i < 5:
+            # TODO: stop loop if remote is off, start when remote is on
+            if self.is_on is False:
+                self.logger.debug("envy is off")
+                asyncio.sleep(5)
+                continue
+
+            if self.notification_reader is None:
+                self.logger.debug("notifications waiting for connection to open")
+                asyncio.sleep(2)
+                continue
+
             try:
                 # send hearbeat
                 async with self.notification_writer_lock:
                     self.notification_writer.write(self.HEARTBEAT)
                     await self.notification_writer.drain()
-                
+
                 async with self.notification_reader_lock:
                     data = await asyncio.wait_for(
                         self.reader.readline(),
