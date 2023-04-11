@@ -61,7 +61,7 @@ class Madvr:
         # Sockets
         self.reader = None
         self.writer = None
-        
+
         self.notification_reader = None
         self.notification_writer = None
         self.is_closed = False
@@ -112,7 +112,7 @@ class Madvr:
 
         try:
             self.notification_writer.close()
-            await self.writer.wait_closed()
+            await self.notification_writer.wait_closed()
         except AttributeError:
             # means its already closed
             pass
@@ -152,7 +152,10 @@ class Madvr:
                 )
 
                 # Notifications client
-                self.notification_reader, self.notification_writer= await asyncio.wait_for(
+                (
+                    self.notification_reader,
+                    self.notification_writer,
+                ) = await asyncio.wait_for(
                     asyncio.open_connection(self.host, self.port), timeout=20
                 )
 
@@ -161,7 +164,8 @@ class Madvr:
 
                 # Make sure first message says WELCOME
                 msg_envy = await asyncio.wait_for(
-                    self.reader.readline(), timeout=10,
+                    self.reader.readline(),
+                    timeout=10,
                 )
 
                 # Check if first 7 char match
@@ -262,7 +266,9 @@ class Madvr:
 
         raise HeartBeatError("Sending heartbeat fatal error")
 
-    async def _construct_command(self, raw_command: Union[str, list]) -> tuple[bytes, str]:
+    async def _construct_command(
+        self, raw_command: Union[str, list]
+    ) -> tuple[bytes, str]:
         """
         Transform commands into their byte values from the string value
 
@@ -272,13 +278,16 @@ class Madvr:
             bytes: the value to send in bytes
             str: the 'msg' field in the Enum used to filter notifications
         """
-        self.logger.debug("raw_command: %s", raw_command)
-        self.logger.debug("raw_command length: %s", len(raw_command))
+        self.logger.debug(
+            "raw_command: %s -- raw_command length: %s", raw_command, len(raw_command)
+        )
+
         skip_val = False
         # HA seems to always send commands as a list even if you set them as a str
 
         # This lets you use single cmds or something with val like KEYPRESS
         # If len is 1, then try to split, otherwise its just one word
+
         if len(raw_command) == 1:
             try:
                 # ['key_press, menu']
@@ -337,9 +346,7 @@ class Madvr:
         # exit loop if exceed maximum checks for ok or retries
         while True:
             try:
-                data = await asyncio.wait_for(
-                    client.readline(), timeout=10
-                )
+                data = await asyncio.wait_for(client.readline(), timeout=10)
                 self.logger.debug("_read_until_ok: data found: %s", data)
 
                 if ACKs.reply.value not in data:
@@ -423,8 +430,12 @@ class Madvr:
                 # send hearbeat
                 self.notification_writer.write(self.HEARTBEAT)
                 await self.notification_writer.drain()
-                data = self.notification_reader.readline()
-                time.sleep(1)
+                data = await asyncio.wait_for(
+                    self.reader.readline(),
+                    timeout=self.command_read_timeout,
+                )
+
+                asyncio.sleep(1)
 
                 i += 1
 
@@ -448,7 +459,7 @@ class Madvr:
                 await self.notification_writer.drain()
                 continue
             except AttributeError:
-                self._reconnect()
+                await self._reconnect()
 
     async def _process_notifications(self, input_data: Union[bytes, str]) -> None:
         """
