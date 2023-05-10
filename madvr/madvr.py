@@ -4,7 +4,6 @@ Implements the MadVR protocol
 
 import logging
 from typing import Final, Union
-import re
 import asyncio
 from madvr.commands import ACKs, Footer, Commands, Enum, Connections
 from madvr.errors import AckError, RetryExceededError, HeartBeatError
@@ -31,31 +30,8 @@ class Madvr:
         self.MADVR_OK: Final = Connections.welcome.value
         self.HEARTBEAT: Final = Connections.heartbeat.value
 
-        # Incoming attrs
-        self.incoming_res = ""
-        self.incoming_frame_rate = ""
-        self.incoming_color_space = ""
-        self.incoming_bit_depth = ""
-        self.hdr_flag = False
-        self.incoming_colorimetry = ""
-        self.incoming_black_levels = ""
-        self.incoming_aspect_ratio = ""
-        self.aspect_ratio: float = 0
-
-        # Temps
-        self.temp_gpu: int = 0
-        self.temp_hdmi: int = 0
-        self.temp_cpu: int = 0
-        self.temp_mainboard: int = 0
-
-        # Outgoing signal
-        self.outgoing_res = ""
-        self.outgoing_frame_rate = ""
-        self.outgoing_color_space = ""
-        self.outgoing_bit_depth = ""
-        self.outgoing_colorimetry = ""
-        self.outgoing_hdr_flag = False
-        self.outgoing_black_levels = ""
+        # stores all attributes
+        self.msg_dict = {}
 
         # Sockets
         self.reader = None
@@ -63,15 +39,12 @@ class Madvr:
         self.reader_lock = asyncio.Lock()
         self.writer_lock = asyncio.Lock()
 
-        self.notification_reader = None
-        self.notification_writer = None
-        self.notification_reader_lock = asyncio.Lock()
-        self.notification_writer_lock = asyncio.Lock()
         self.is_closed = False
         # Envy does not have an are you on cmd, just assuming its on based on active connection
         self.is_on = False
         self.read_limit = 8000
         self.command_read_timeout = 3
+
         self.logger.debug("Running in debug mode")
 
     async def _clear_attr(self) -> None:
@@ -79,30 +52,7 @@ class Madvr:
         Clear instance attr so HA doesn't report stale values
         """
         # Incoming attrs
-        self.incoming_res = ""
-        self.incoming_frame_rate = ""
-        self.incoming_color_space = ""
-        self.incoming_bit_depth = ""
-        self.hdr_flag = False
-        self.incoming_colorimetry = ""
-        self.incoming_black_levels = ""
-        self.incoming_aspect_ratio = ""
-        self.aspect_ratio = 0
-
-        # Temps
-        self.temp_gpu = 0
-        self.temp_hdmi = 0
-        self.temp_cpu = 0
-        self.temp_mainboard = 0
-
-        # Outgoing signal
-        self.outgoing_res = ""
-        self.outgoing_frame_rate = ""
-        self.outgoing_color_space = ""
-        self.outgoing_bit_depth = ""
-        self.outgoing_colorimetry = ""
-        self.outgoing_hdr_flag = False
-        self.outgoing_black_levels = ""
+        self.msg_dict = {}
 
     async def close_connection(self) -> None:
         """close the connection"""
@@ -113,17 +63,8 @@ class Madvr:
             except AttributeError:
                 # means its already closed
                 pass
-        async with self.notification_writer_lock:
-            try:
-                self.notification_writer.close()
-                await self.notification_writer.wait_closed()
-            except AttributeError:
-                # means its already closed
-                pass
 
         self.reader = None
-        self.notification_reader = None
-
         self.is_closed = True
 
         # Clear attr
@@ -143,24 +84,16 @@ class Madvr:
 
         Raises AckError
         """
-
-        while True:
+        i = 0
+        while i < 10:
             try:
                 self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
 
                 # Command client
-                async with self.reader_lock, self.notification_reader_lock:
+                async with self.reader_lock:
                     self.reader, self.writer = await asyncio.wait_for(
                         asyncio.open_connection(self.host, self.port),
                         timeout=self.command_read_timeout,
-                    )
-
-                    # Notifications client
-                    (
-                        self.notification_reader,
-                        self.notification_writer,
-                    ) = await asyncio.wait_for(
-                        asyncio.open_connection(self.host, self.port), timeout=20
                     )
 
                 # Test heartbeat
@@ -180,17 +113,6 @@ class Madvr:
                         f"Notification did not reply with correct greeting: {msg_envy}"
                     )
 
-                # Make sure first message says WELCOME for notifications
-                async with self.notification_reader_lock:
-                    msg_envy = await asyncio.wait_for(
-                        self.notification_reader.readline(), timeout=20
-                    )
-
-                # Check if first 7 char match
-                if self.MADVR_OK != msg_envy[:7]:
-                    raise AckError(
-                        f"Notification did not reply with correct greeting: {msg_envy}"
-                    )
                 self.logger.info("Waiting for envy to be available")
                 # envy needs some time to setup new connections
                 await asyncio.sleep(3)
@@ -210,6 +132,7 @@ class Madvr:
                     "Error sending heartbeat, retrying in %s seconds", 2
                 )
                 await asyncio.sleep(2)
+                i += 1
                 continue
 
             # includes conn refused
@@ -217,6 +140,7 @@ class Madvr:
             except asyncio.TimeoutError:
                 self.logger.warning("Connecting timeout, retrying in %s seconds", 2)
                 await asyncio.sleep(2)
+                i += 1
                 continue
 
             # includes conn refused
@@ -225,6 +149,7 @@ class Madvr:
                 self.logger.warning("Connecting failed, retrying in %s seconds", 2)
                 self.logger.debug(err)
                 await asyncio.sleep(2)
+                i += 1
                 continue
 
     async def _send_heartbeat(self) -> None:
@@ -235,36 +160,14 @@ class Madvr:
 
         Raises HeartBeatError exception
         """
-        i = 0
+        # confirm can send heartbeat, ready for commands
+        self.logger.debug("Sending heartbeats")
 
-        while i < 3:
-            # confirm can send heartbeat, ready for commands
-            self.logger.debug("Sending heartbeats")
+        async with self.writer_lock:
+            self.writer.write(self.HEARTBEAT)
+            await self.writer.drain()
 
-            async with self.writer_lock:
-                self.writer.write(self.HEARTBEAT)
-                await self.writer.drain()
-
-            # Recv until we find ok or timeout
-            if not await self._read_until_ok(self.reader):
-                i += 1
-                continue
-
-            # send heartbeat with notification and read ack and then regular client
-            # ensure both work one after the next
-            async with self.notification_writer_lock:
-                self.notification_writer.write(self.HEARTBEAT)
-                await self.notification_writer.drain()
-
-            if not await self._read_until_ok(self.notification_reader):
-                i += 1
-                continue
-
-            self.logger.debug("Handshakes complete")
-
-            return
-
-        raise HeartBeatError("Sending heartbeat fatal error")
+        self.logger.debug("Handshakes complete")
 
     async def _construct_command(
         self, raw_command: Union[str, list]
@@ -338,30 +241,6 @@ class Madvr:
 
         return cmd, val
 
-    async def _read_until_ok(self, client: asyncio.StreamReader) -> bool:
-        """
-        Read the buffer until we get ok or timeout because a timeout means no more to read
-        """
-        counter = 0
-        # exit loop if exceed maximum checks for ok or retries
-        while True:
-            try:
-                async with self.reader_lock, self.notification_reader_lock:
-                    data = await asyncio.wait_for(client.readline(), timeout=10)
-                    self.logger.debug("_read_until_ok: data found: %s", data)
-
-                if ACKs.reply.value not in data:
-                    self.logger.debug("OK not found yet counter: %s", counter)
-                    counter += 1
-                    continue
-
-                self.logger.debug("OK found counter: %s", counter)
-                return True
-
-            except asyncio.TimeoutError:
-                self.logger.debug("Timeout reading ack with counter: %s", counter)
-                return False
-
     async def send_command(self, command: Union[str, list]) -> str:
         """
         send a given command same as the official madvr ones
@@ -416,134 +295,39 @@ class Madvr:
 
         return ""
 
-    async def start_read_notifications(self, wait_forever: bool) -> None:
-        """
-        Listen for notifications. Meant to run as a background task
-        wait_forever: bool -> if true, it will block forever. False useful for testing
-        """
-
-        # Receive data in a loop
-        i = 0
-        while wait_forever or i < 5:
-            # TODO: stop loop if remote is off, start when remote is on
-            if self.is_on is False:
-                self.logger.debug("envy is off")
-                asyncio.sleep(5)
+    async def _process_notifications(self, msg: str) -> None:
+        """Parse a message and store the attributes and values in a dictionary"""
+        notifications = msg.split("\r\n")
+        # for each /r/n split it by title, then the rest are values
+        for notification in notifications:
+            title, *signal_info = notification.split(" ")
+            # dont process empty values
+            if not signal_info:
                 continue
-
-            if self.notification_reader is None:
-                self.logger.debug("notifications waiting for connection to open")
-                asyncio.sleep(2)
-                continue
-
-            try:
-                # send hearbeat
-                async with self.notification_writer_lock:
-                    self.notification_writer.write(self.HEARTBEAT)
-                    await self.notification_writer.drain()
-
-                async with self.notification_reader_lock:
-                    data = await asyncio.wait_for(
-                        self.reader.readline(),
-                        timeout=self.command_read_timeout,
-                    )
-
-                asyncio.sleep(1)
-
-                i += 1
-
-                if data:
-                    # process data which will get added as class attr
-                    await self._process_notifications(data)
-                else:
-                    # just wait forever for data
-                    # send heartbeat keep conn open
-                    async with self.notification_writer_lock:
-                        self.notification_writer.write(self.HEARTBEAT)
-                        await self.notification_writer.drain()
-                    continue
-            except asyncio.TimeoutError:
-                self.logger.debug("Connection timed out")
-                async with self.notification_writer_lock:
-                    self.notification_writer.write(self.HEARTBEAT)
-                    await self.notification_writer.drain()
-                continue
-            except OSError:
-                self.logger.debug("Connection error")
-                async with self.notification_writer_lock:
-                    self.notification_writer.write(self.HEARTBEAT)
-                    await self.notification_writer.drain()
-                continue
-            except AttributeError:
-                await self._reconnect()
-
-    async def _process_notifications(self, input_data: Union[bytes, str]) -> None:
-        """
-        Process arbitrary stream of notifications and set them as instance attr
-        """
-        # This code constructs a dict for all values processed
-        self.logger.debug("Processing data for %s", input_data)
-        try:
-            if isinstance(input_data, bytes):
-                # This pattern will be able to extract from the byte encoded stream
-                pattern = r"([A-Z][^\r\n]*)\r\n"
-                groups = re.findall(pattern, input_data.decode())
-                # split the groups, the first element is the key, remove the key from the values
-                # for each match in groups, add it to dict
-                # {"key": ["val1", "val2"]}
-                val_dict: dict = {
-                    group.split()[0]: group.replace(group.split()[0] + " ", "").split()
-                    for group in groups
-                }
-                self.logger.debug("groups: %s", groups)
-            else:
-                self.logger.debug("input data: %s", input_data)
-                # This pattern extracts from a regular string
-                # If we have a str its assumed we are dealing with one output stream
-                pattern = r"([A-Z][A-Za-z]*)\s(.*)"
-                match = re.search(pattern, input_data)
-                val_dict: dict = {match.group(1): match.group(2).split()}
-
-            self.logger.debug("val dict: %s", val_dict)
-        except AttributeError:
-            return
-
-        # Map values to attr
-        incoming_signal_info: list = val_dict.get("IncomingSignalInfo", [])
-        if incoming_signal_info:
-            self.logger.debug("incoming signal detected: %s", incoming_signal_info)
-            self.incoming_res = incoming_signal_info[0]
-            self.incoming_frame_rate = incoming_signal_info[1]
-            self.incoming_color_space = incoming_signal_info[3]
-            self.incoming_bit_depth = incoming_signal_info[4]
-            self.hdr_flag = "HDR" in incoming_signal_info[5]
-            self.incoming_colorimetry = incoming_signal_info[6]
-            self.incoming_black_levels = incoming_signal_info[7]
-            self.incoming_aspect_ratio = incoming_signal_info[8]
-
-        aspect_ratio: list = val_dict.get("AspectRatio", [])
-        if aspect_ratio:
-            self.logger.debug("incoming AR detected: %s", aspect_ratio)
-            self.aspect_ratio = float(aspect_ratio[1])
-
-        get_temps: list = val_dict.get("Temperatures", [])
-        if get_temps:
-            self.logger.debug("incoming Temps detected: %s", get_temps)
-            self.temp_gpu = int(get_temps[0])
-            self.temp_hdmi = int(get_temps[1])
-            self.temp_cpu = int(get_temps[2])
-            self.temp_mainboard = int(get_temps[3])
-
-        outgoing_signal_info: list = val_dict.get("OutgoingSignalInfo", [])
-        if outgoing_signal_info:
-            self.logger.debug("outgoing signal detected: %s", outgoing_signal_info)
-            self.outgoing_res = outgoing_signal_info[0]
-            self.outgoing_frame_rate = outgoing_signal_info[1]
-            self.outgoing_color_space = outgoing_signal_info[3]
-            self.outgoing_bit_depth = outgoing_signal_info[4]
-            self.outgoing_hdr_flag = "HDR" in outgoing_signal_info[5]
-            self.outgoing_colorimetry = outgoing_signal_info[6]
-            self.outgoing_black_levels = outgoing_signal_info[7]
+            # at least madvr sends attributes in a consistent order
+            # could use zip here but why? this works and is simple
+            if "IncomingSignalInfo" in title:
+                self.msg_dict["incoming_res"] = signal_info[0]
+                self.msg_dict["incoming_frame_rate"] = signal_info[1]
+                self.msg_dict["incoming_color_space"] = signal_info[3]
+                self.msg_dict["incoming_bit_depth"] = signal_info[4]
+                self.msg_dict["hdr_flag"] = "HDR" in signal_info[5]
+                self.msg_dict["incoming_colorimetry"] = signal_info[6]
+                self.msg_dict["incoming_black_levels"] = signal_info[7]
+                self.msg_dict["incoming_aspect_ratio"] = signal_info[8]
+            elif "OutgoingSignalInfo" in title:
+                self.msg_dict["outgoing_res"] = signal_info[0]
+                self.msg_dict["outgoing_frame_rate"] = signal_info[1]
+                self.msg_dict["outgoing_color_space"] = signal_info[3]
+                self.msg_dict["outgoing_bit_depth"] = signal_info[4]
+                self.msg_dict["outgoing_hdr_flag"] = "HDR" in signal_info[5]
+                self.msg_dict["outgoing_colorimetry"] = signal_info[6]
+                self.msg_dict["outgoing_black_levels"] = signal_info[7]
+            elif "AspectRatio" in title:
+                self.msg_dict["aspect_res"] = signal_info[0]
+                self.msg_dict["aspect_dec"] = float(signal_info[1])
+                self.msg_dict["aspect_int"] = signal_info[2]
+                self.msg_dict["aspect_name"] = signal_info[3]
 
     async def power_off(self, standby=False) -> str:
         """
