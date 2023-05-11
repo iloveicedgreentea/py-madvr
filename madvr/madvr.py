@@ -295,8 +295,38 @@ class Madvr:
 
         return ""
 
+    async def read_notifications(self) -> None:
+        """
+        Read notifications from the server and update attributes
+        """
+        # read notifications
+        try:
+            async with self.reader_lock:
+                msg = await asyncio.wait_for(
+                    self.reader.read(self.read_limit),
+                    timeout=self.command_read_timeout,
+                )
+
+        except asyncio.TimeoutError:
+            self.logger.warning("Reading notifications timed out")
+            return
+
+        except OSError:
+            self.logger.warning("Reading notifications failed")
+            return
+
+        # if the msg is empty, then the connection is closed
+        if not msg:
+            # self.logger.warning("Connection closed")
+            # await self.close_connection()
+            return
+
+        # if the msg is not empty, process it
+        await self._process_notifications(msg.decode("utf-8"))
+
     async def _process_notifications(self, msg: str) -> None:
         """Parse a message and store the attributes and values in a dictionary"""
+        self.logger.debug("Processing notifications: %s", msg)
         notifications = msg.split("\r\n")
         # for each /r/n split it by title, then the rest are values
         for notification in notifications:
