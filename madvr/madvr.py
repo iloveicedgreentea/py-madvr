@@ -85,7 +85,7 @@ class Madvr:
         Raises AckError
         """
         i = 0
-        while i < 10:
+        while i < 3:
             try:
                 self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
 
@@ -151,6 +151,10 @@ class Madvr:
                 await asyncio.sleep(2)
                 i += 1
                 continue
+
+            finally:
+                if i >= 3:
+                    self.logger.error("Failed to reconnect after 3 attempts")
 
     async def _send_heartbeat(self) -> None:
         """
@@ -270,28 +274,22 @@ class Madvr:
         retry_count = 0
 
         while retry_count < 5:
-            # Send the command
             try:
                 async with self.writer_lock:
                     self.writer.write(cmd)
                     await self.writer.drain()
-
-            except asyncio.TimeoutError:
-                self.logger.debug("OK receipt timed out, retrying")
+                break  # if success, break the loop
+            except (asyncio.TimeoutError, OSError):
+                self.logger.debug(
+                    "OK receipt timed out or connection failed when reading OK, retrying"
+                )
                 retry_count += 1
+                await asyncio.sleep(1)  # sleep before retrying
                 continue
 
-            # should catch connection is closed
-            except OSError:
-                self.logger.warning("connection failed when reading OK, retrying")
-                retry_count += 1
-                continue
-
-            return ""
-
-        # if we got here something went wrong
-        await self.close_connection()
-        await self._reconnect()
+        if retry_count == 5:  # if we got here something went wrong
+            await self.close_connection()
+            await self._reconnect()
 
         return ""
 
@@ -300,36 +298,21 @@ class Madvr:
         Read notifications from the server and update attributes
         """
         while True:
-            # read notifications
             try:
                 async with self.reader_lock:
                     msg = await asyncio.wait_for(
                         self.reader.read(self.read_limit),
                         timeout=self.command_read_timeout,
                     )
-            except AttributeError:
-                self.logger.warning("not connected")
-                asyncio.sleep(2)
+            except (AttributeError, asyncio.TimeoutError, OSError) as err:
+                self.logger.warning(f"Reading notifications failed or timed out: {err}")
+                await asyncio.sleep(5)
                 continue
 
-            except asyncio.TimeoutError:
-                self.logger.warning("Reading notifications timed out")
-                await asyncio.sleep(1)
-                continue
-
-            except OSError:
-                self.logger.warning("Reading notifications failed")
-                await asyncio.sleep(1)
-                continue
-
-            # if the msg is empty, then the connection could be closed
             if not msg:
-                # self.logger.warning("Connection closed")
-                # await self.close_connection()
                 await asyncio.sleep(1)
                 continue
 
-            # if the msg is not empty, process it
             await self._process_notifications(msg.decode("utf-8"))
 
     async def _process_notifications(self, msg: str) -> None:
