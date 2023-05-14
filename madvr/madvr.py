@@ -399,7 +399,7 @@ class Madvr:
         # dont do anything if its off besides mark it off
         # sending command will open connection
         try:
-            res = await self.send_command("Standby" if standby else "PowerOff")
+            res = await self.send_command(["Standby"] if standby else ["PowerOff"])
             await self.close_connection()
             self.is_on = False
 
