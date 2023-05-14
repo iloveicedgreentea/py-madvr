@@ -126,7 +126,7 @@ class Madvr:
                 await asyncio.sleep(3)
 
                 # handshake func
-                await self._send_heartbeat()
+                await self.send_heartbeat()
 
                 self.logger.info("Connection established")
 
@@ -159,7 +159,7 @@ class Madvr:
                 await asyncio.sleep(2)
                 continue
 
-    async def _send_heartbeat(self) -> None:
+    async def send_heartbeat(self) -> None:
         """
         Send a heartbeat to keep connection open
 
@@ -167,14 +167,24 @@ class Madvr:
 
         Raises HeartBeatError exception
         """
-        # confirm can send heartbeat, ready for commands
-        self.logger.debug("Sending heartbeats")
+        while True:
+            await self.connection_event.wait()
+            # confirm can send heartbeat, ready for commands
+            self.logger.debug("Sending heartbeats")
+            try:
+                async with self.writer_lock:
+                    self.writer.write(self.HEARTBEAT)
+                    await self.writer.drain()
 
-        async with self.writer_lock:
-            self.writer.write(self.HEARTBEAT)
-            await self.writer.drain()
-
-        self.logger.debug("Handshakes complete")
+                self.logger.debug("heartbeat complete")
+            except asyncio.TimeoutError:
+                self.logger.error("timeout when sending heartbeat")
+            except OSError:
+                self.logger.error("error when sending heartbeat")
+                await self._reconnect()
+            finally:
+                # Wait some time before the next heartbeat
+                await asyncio.sleep(15)
 
     async def _construct_command(
         self, raw_command: list[str]
@@ -222,12 +232,12 @@ class Madvr:
             # raw command will be a list of 2
             command, value = raw_command
 
-        self.logger.debug("using command %s", command)
+        self.logger.debug("checking command %s", command)
 
         # Check if command is implemented
         if not hasattr(Commands, command):
             raise NotImplementedError(f"Command not implemented: {command}")
-
+        self.logger.debug("Found command")
         # construct the command with nested Enums
         command_name, val, _ = Commands[command].value
 
@@ -260,7 +270,8 @@ class Madvr:
         # Verify the command is supported
         try:
             cmd, enum_type = await self._construct_command(command)
-        except NotImplementedError:
+        except NotImplementedError as err:
+            self.logger.error("command not implemented: %s -- %s", command, err)
             return f"Command not found: {command}"
 
         self.logger.debug("using values: %s %s", cmd, enum_type)
