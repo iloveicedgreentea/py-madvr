@@ -339,7 +339,7 @@ class Madvr:
                 )
                 await self._reconnect()
             except (AttributeError, asyncio.TimeoutError, OSError) as err:
-                self.logger.warning(
+                self.logger.debug(
                     "Reading notifications failed or timed out: %s", err
                 )
                 await asyncio.sleep(5)
