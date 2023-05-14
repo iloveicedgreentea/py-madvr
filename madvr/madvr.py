@@ -177,7 +177,7 @@ class Madvr:
         self.logger.debug("Handshakes complete")
 
     async def _construct_command(
-        self, raw_command: Union[str, list]
+        self, raw_command: list[str]
     ) -> tuple[bytes, str]:
         """
         Transform commands into their byte values from the string value
@@ -196,7 +196,7 @@ class Madvr:
         # HA seems to always send commands as a list even if you set them as a str
 
         # This lets you use single cmds or something with val like KEYPRESS
-        # If len is 1, then try to split, otherwise its just one word
+        # If len is 1 like ["keypress,val"], then try to split, otherwise its just one word
 
         if len(raw_command) == 1:
             try:
@@ -209,7 +209,7 @@ class Madvr:
             except ValueError as err:
                 self.logger.debug(err)
                 self.logger.debug("Using raw_command directly")
-                command = raw_command
+                command = raw_command[0]
                 skip_val = True
         # if there are more than two values, this is incorrect, error
         elif len(raw_command) > 2:
@@ -248,12 +248,12 @@ class Madvr:
 
         return cmd, val
 
-    async def send_command(self, command: Union[str, list]) -> str:
+    async def send_command(self, command: list) -> str:
         """
         send a given command same as the official madvr ones
         To keep this simple, just send the command without reading response
 
-        command: str - command to send like KeyPress, MENU
+        command: list - command to send like [KeyPress, MENU]
         Raises RetryExceededError
         """
 
