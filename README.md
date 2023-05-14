@@ -2,7 +2,7 @@
 
 Support for IP based controls for MadVR Envy
 
-Supports real time notifications and wake on lan.
+Supports real time notifications and commands
 
 ## Commands
 Command structure follows the same in the manual https://madvrenvy.com/wp-content/uploads/EnvyIpControl.pdf?r=112a
