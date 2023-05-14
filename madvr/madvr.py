@@ -126,7 +126,7 @@ class Madvr:
                 await asyncio.sleep(3)
 
                 # handshake func
-                await self.send_heartbeat()
+                await self.send_heartbeat(True)
 
                 self.logger.info("Connection established")
 
@@ -159,7 +159,7 @@ class Madvr:
                 await asyncio.sleep(2)
                 continue
 
-    async def send_heartbeat(self) -> None:
+    async def send_heartbeat(self, once=False) -> None:
         """
         Send a heartbeat to keep connection open
 
@@ -177,6 +177,8 @@ class Madvr:
                     await self.writer.drain()
 
                 self.logger.debug("heartbeat complete")
+                if once:
+                    break
             except asyncio.TimeoutError:
                 self.logger.error("timeout when sending heartbeat")
             except OSError:
