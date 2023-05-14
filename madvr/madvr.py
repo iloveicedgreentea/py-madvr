@@ -309,8 +309,15 @@ class Madvr:
                         self.reader.read(self.read_limit),
                         timeout=self.command_read_timeout,
                     )
+            except ConnectionResetError:
+                self.logger.warning(
+                    "Connection reset by peer. Attempting to reconnect..."
+                )
+                await self._reconnect()
             except (AttributeError, asyncio.TimeoutError, OSError) as err:
-                self.logger.warning(f"Reading notifications failed or timed out: {err}")
+                self.logger.warning(
+                    "Reading notifications failed or timed out: %s", err
+                )
                 await asyncio.sleep(5)
                 continue
 
@@ -332,6 +339,8 @@ class Madvr:
                 continue
             # at least madvr sends attributes in a consistent order
             # could use zip here but why? this works and is simple
+            if "NoSignal" in title:
+                return
             if "IncomingSignalInfo" in title:
                 self.msg_dict["incoming_res"] = signal_info[0]
                 self.msg_dict["incoming_frame_rate"] = signal_info[1]
