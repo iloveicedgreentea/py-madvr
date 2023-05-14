@@ -1,15 +1,12 @@
-# Py MadVR
+# MadVR Envy Python Library
 
-Support for IP based controls for Envys''
+Support for IP based controls for MadVR Envy
 
-*Note: IP control does not work if there is no input signal, by design"
-
-Readme WIP
+Supports real time notifications and wake on lan.
 
 ## Commands
-same as the one in the docs like PowerOff. 
+Command structure follows the same in the manual https://madvrenvy.com/wp-content/uploads/EnvyIpControl.pdf?r=112a
 
-For things that take params, use a command -> KeyPress, MENU
+For things that take values, use a comma -> `["KeyPress, MENU"]`
 
-if you want to use power_off() you need to run it before turnging off other stuff bc render thread
-Recomend configuring update to be short, less than 5 seconds
+Not every single command is implemented, such as submenus or changing complicated options. You can use commands for all the typical stuff the remote can do.
