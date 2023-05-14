@@ -299,30 +299,38 @@ class Madvr:
         """
         Read notifications from the server and update attributes
         """
-        # read notifications
-        try:
-            async with self.reader_lock:
-                msg = await asyncio.wait_for(
-                    self.reader.read(self.read_limit),
-                    timeout=self.command_read_timeout,
-                )
+        while True:
+            # read notifications
+            try:
+                async with self.reader_lock:
+                    msg = await asyncio.wait_for(
+                        self.reader.read(self.read_limit),
+                        timeout=self.command_read_timeout,
+                    )
+            except AttributeError:
+                self.logger.warning("not connected")
+                asyncio.sleep(2)
+                continue
 
-        except asyncio.TimeoutError:
-            self.logger.warning("Reading notifications timed out")
-            return
+            except asyncio.TimeoutError:
+                self.logger.warning("Reading notifications timed out")
+                await asyncio.sleep(1)
+                continue
 
-        except OSError:
-            self.logger.warning("Reading notifications failed")
-            return
+            except OSError:
+                self.logger.warning("Reading notifications failed")
+                await asyncio.sleep(1)
+                continue
 
-        # if the msg is empty, then the connection is closed
-        if not msg:
-            # self.logger.warning("Connection closed")
-            # await self.close_connection()
-            return
+            # if the msg is empty, then the connection could be closed
+            if not msg:
+                # self.logger.warning("Connection closed")
+                # await self.close_connection()
+                await asyncio.sleep(1)
+                continue
 
-        # if the msg is not empty, process it
-        await self._process_notifications(msg.decode("utf-8"))
+            # if the msg is not empty, process it
+            await self._process_notifications(msg.decode("utf-8"))
 
     async def _process_notifications(self, msg: str) -> None:
         """Parse a message and store the attributes and values in a dictionary"""
