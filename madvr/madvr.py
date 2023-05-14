@@ -167,6 +167,21 @@ class Madvr:
 
         Raises HeartBeatError exception
         """
+        if once:
+            try:
+                async with self.writer_lock:
+                    self.writer.write(self.HEARTBEAT)
+                    await self.writer.drain()
+
+                self.logger.debug("heartbeat complete")
+            except asyncio.TimeoutError:
+                self.logger.error("timeout when sending heartbeat")
+            except OSError:
+                self.logger.error("error when sending heartbeat")
+                await self._reconnect()
+
+            return
+
         while True:
             await self.connection_event.wait()
             # confirm can send heartbeat, ready for commands
@@ -177,8 +192,6 @@ class Madvr:
                     await self.writer.drain()
 
                 self.logger.debug("heartbeat complete")
-                if once:
-                    break
             except asyncio.TimeoutError:
                 self.logger.error("timeout when sending heartbeat")
             except OSError:
@@ -188,9 +201,7 @@ class Madvr:
                 # Wait some time before the next heartbeat
                 await asyncio.sleep(15)
 
-    async def _construct_command(
-        self, raw_command: list[str]
-    ) -> tuple[bytes, str]:
+    async def _construct_command(self, raw_command: list[str]) -> tuple[bytes, str]:
         """
         Transform commands into their byte values from the string value
 
