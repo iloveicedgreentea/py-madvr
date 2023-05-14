@@ -26,6 +26,10 @@ class Madvr:
         self.connect_timeout: int = connect_timeout
         self.logger = logger
 
+        # used to indicate if connection is ready
+        self.connection_event = asyncio.Event()
+        self.stop_reconnect = asyncio.Event()
+
         # Const values
         self.MADVR_OK: Final = Connections.welcome.value
         self.HEARTBEAT: Final = Connections.heartbeat.value
@@ -66,6 +70,7 @@ class Madvr:
 
         self.reader = None
         self.is_closed = True
+        self.connection_event.clear()
 
         # Clear attr
         await self._clear_attr()
@@ -78,14 +83,17 @@ class Madvr:
         except AckError as err:
             self.logger.error(err)
 
+    def stop(self):
+        """Stop reconnecting"""
+        self.stop_reconnect.set()
+
     async def _reconnect(self) -> None:
         """
         Initiate keep-alive connection. This should handle any error and reconnect eventually.
 
         Raises AckError
         """
-        i = 0
-        while i < 3:
+        while not self.stop_reconnect.is_set():
             try:
                 self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
 
@@ -93,7 +101,7 @@ class Madvr:
                 async with self.reader_lock:
                     self.reader, self.writer = await asyncio.wait_for(
                         asyncio.open_connection(self.host, self.port),
-                        timeout=self.command_read_timeout,
+                        timeout=2,
                     )
 
                 # Test heartbeat
@@ -125,6 +133,8 @@ class Madvr:
                 self.is_on = True
                 self.is_closed = False
 
+                self.connection_event.set()
+
                 return
 
             except HeartBeatError:
@@ -132,7 +142,6 @@ class Madvr:
                     "Error sending heartbeat, retrying in %s seconds", 2
                 )
                 await asyncio.sleep(2)
-                i += 1
                 continue
 
             # includes conn refused
@@ -140,7 +149,6 @@ class Madvr:
             except asyncio.TimeoutError:
                 self.logger.warning("Connecting timeout, retrying in %s seconds", 2)
                 await asyncio.sleep(2)
-                i += 1
                 continue
 
             # includes conn refused
@@ -149,12 +157,7 @@ class Madvr:
                 self.logger.warning("Connecting failed, retrying in %s seconds", 2)
                 self.logger.debug(err)
                 await asyncio.sleep(2)
-                i += 1
                 continue
-
-            finally:
-                if i >= 3:
-                    self.logger.error("Failed to reconnect after 3 attempts")
 
     async def _send_heartbeat(self) -> None:
         """
@@ -298,6 +301,8 @@ class Madvr:
         Read notifications from the server and update attributes
         """
         while True:
+            # wait until the connection is established
+            await self.connection_event.wait()
             try:
                 async with self.reader_lock:
                     msg = await asyncio.wait_for(
