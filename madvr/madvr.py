@@ -67,13 +67,16 @@ class Madvr:
             except AttributeError:
                 # means its already closed
                 pass
-
+        self.logger.debug("self.writer is closed")
         self.reader = None
         self.is_closed = True
+        self.logger.debug("clearing connection event")
         self.connection_event.clear()
 
         # Clear attr
+        self.logger.debug("clearing attr")
         await self._clear_attr()
+        self.logger.debug("connection is closed")
 
     async def open_connection(self) -> None:
         """Open a connection"""
@@ -399,10 +402,15 @@ class Madvr:
         # dont do anything if its off besides mark it off
         # sending command will open connection
         try:
+            # stop trying to reconnect
+            self.logger.debug("setting stop reconnect")
+            self.stop()
+            self.logger.debug("sending power off command")
             res = await self.send_command(["Standby"] if standby else ["PowerOff"])
+            self.logger.debug("closing connection")
             await self.close_connection()
             self.is_on = False
-
+            self.logger.debug("finished power_off")
             return res
 
         except RetryExceededError:
