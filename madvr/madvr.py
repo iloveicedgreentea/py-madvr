@@ -82,6 +82,7 @@ class Madvr:
         """Open a connection"""
         self.logger.debug("Starting open connection")
         try:
+            self.stop_reconnect.clear()
             await self._reconnect()
         except AckError as err:
             self.logger.error(err)
