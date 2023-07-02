@@ -92,6 +92,8 @@ class Menus(Enum):
 class Profiles(Enum):
     SOURCE = b"SOURCE"
     DISPLAY = b"DISPLAY"
+    # CUSTOM 2 
+    CUSTOM = b"CUSTOM"
 
 class Commands(Enum):
     # Power stuff
