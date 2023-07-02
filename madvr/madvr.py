@@ -223,31 +223,34 @@ class Madvr:
         # HA seems to always send commands as a list even if you set them as a str
 
         # This lets you use single cmds or something with val like KEYPRESS
-        # If len is 1 like ["keypress,val"], then try to split, otherwise its just one word
 
-        if len(raw_command) == 1:
+        # If len is 1 like ["keypress,val"], then try to split, otherwise its just one word
+        # sent directly from HA send_command
+        if len(raw_command) == 1:  # if its a list
             try:
-                # ['key_press, menu']
-                command, raw_value = raw_command[0].split(",")
+                # ['key_press, menu'] -> 'key_press', ['menu']
+                # ['activate_profile, SOURCE, 1'] -> 'activate_profile', ['SOURCE', '1']
+                command, *raw_value = raw_command[0].split(",")
                 # remove space
-                value = raw_value.strip()
-                self.logger.debug("using command %s and value %s", command, value)
+                values = [val.strip() for val in raw_value]
+                self.logger.debug("using command %s and values %s", command, values)
             # if valuerror it means theres just one command like PowerOff, so use that directly
             except ValueError as err:
                 self.logger.debug(err)
                 self.logger.debug("Using raw_command directly")
                 command = raw_command[0]
                 skip_val = True
-        # if there are more than two values, this is incorrect, error
-        elif len(raw_command) > 2:
+        # if there are more than three values, this is incorrect, error
+        elif len(raw_command) > 3:
             self.logger.error(
-                "More than two command values provided. Envy does not have more than 2 command values e.g KeyPress MENU"
+                "More than three command values provided."
             )
             raise NotImplementedError(f"Too many values provided {raw_command}")
         else:
+            self.logger.debug("command is a list")
             # else a command was provided as a proper list ['keypress', 'menu']
-            # raw command will be a list of 2
-            command, value = raw_command
+            # raw command will be a list of 2+
+            command, *values = raw_command
 
         self.logger.debug("checking command %s", command)
 
@@ -261,9 +264,22 @@ class Madvr:
         # if there is a value to process
         if not skip_val:
             try:
-                command_base: bytes = command_name + b" " + val[value.lstrip(" ")].value
+                # add the base command
+                command_base: bytes = command_name
+
+                # append each value with a space
+                for value in values:
+                    # if value is a number, use it directly
+                    # TODO: check this?
+                    if value.isnumeric(): # encode 1 for ActivateProfile
+                        command_base += b" " + value.encode("utf-8")
+                    else:
+                        # else use the enum
+                        command_base += b" " + val[value.lstrip(" ")].value
+
                 # Construct command based on required values
                 cmd: bytes = command_base + Footer.footer.value
+
             except KeyError as exc:
                 raise NotImplementedError(
                     "Incorrect parameter given for command"
