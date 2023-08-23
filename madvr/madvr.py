@@ -242,9 +242,7 @@ class Madvr:
                 skip_val = True
         # if there are more than three values, this is incorrect, error
         elif len(raw_command) > 3:
-            self.logger.error(
-                "More than three command values provided."
-            )
+            self.logger.error("More than three command values provided.")
             raise NotImplementedError(f"Too many values provided {raw_command}")
         else:
             self.logger.debug("command is a list")
@@ -271,7 +269,7 @@ class Madvr:
                 for value in values:
                     # if value is a number, use it directly
                     # TODO: check this?
-                    if value.isnumeric(): # encode 1 for ActivateProfile
+                    if value.isnumeric():  # encode 1 for ActivateProfile
                         command_base += b" " + value.encode("utf-8")
                     else:
                         # else use the enum
@@ -407,6 +405,13 @@ class Madvr:
                 self.msg_dict["aspect_dec"] = float(signal_info[1])
                 self.msg_dict["aspect_int"] = signal_info[2]
                 self.msg_dict["aspect_name"] = signal_info[3]
+            elif "MaskingRatio" in title:
+                self.msg_dict["masking_res"] = signal_info[0]
+                self.msg_dict["masking_dec"] = float(signal_info[1])
+                self.msg_dict["masking_int"] = signal_info[2]
+            elif "ActivateProfile" in title:
+                self.msg_dict["profile_name"] = signal_info[0]
+                self.msg_dict["profile_num"] = signal_info[1]
 
     async def power_off(self, standby=False) -> str:
         """
