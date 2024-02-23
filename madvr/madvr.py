@@ -381,8 +381,7 @@ class Madvr:
             # could use zip here but why? this works and is simple
             if "NoSignal" in title:
                 self.msg_dict["is_signal"] = False
-                return
-            if "IncomingSignalInfo" in title:
+            elif "IncomingSignalInfo" in title:
                 self.msg_dict["is_signal"] = True
                 self.msg_dict["incoming_res"] = signal_info[0]
                 self.msg_dict["incoming_frame_rate"] = signal_info[1]
