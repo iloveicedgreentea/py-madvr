@@ -48,8 +48,13 @@ class Madvr:
         self.is_on = False
         self.read_limit = 8000
         self.command_read_timeout = 3
+        # self.async_write_ha_state from HA
+        self.update_callback = None
 
         self.logger.debug("Running in debug mode")
+
+    def set_update_callback(self, callback):
+        self.update_callback = callback
 
     async def _clear_attr(self) -> None:
         """
@@ -268,7 +273,6 @@ class Madvr:
                 # append each value with a space
                 for value in values:
                     # if value is a number, use it directly
-                    # TODO: check this?
                     if value.isnumeric():  # encode 1 for ActivateProfile
                         command_base += b" " + value.encode("utf-8")
                     else:
@@ -357,8 +361,7 @@ class Madvr:
                 )
                 await self._reconnect()
             except (AttributeError, asyncio.TimeoutError, OSError) as err:
-                self.logger.debug("Reading notifications failed or timed out: %s", err)
-                await asyncio.sleep(5)
+                self.logger.error("Reading notifications failed or timed out: %s", err)
                 continue
 
             if not msg:
@@ -411,6 +414,17 @@ class Madvr:
             elif "ActivateProfile" in title:
                 self.msg_dict["profile_name"] = signal_info[0]
                 self.msg_dict["profile_num"] = signal_info[1]
+            elif "ActiveProfile" in title:
+                self.msg_dict["profile_name"] = signal_info[0]
+                self.msg_dict["profile_num"] = signal_info[1]
+
+            # update state immediately
+            if self.update_callback is not None:
+                try:
+                    self.update_callback()
+                # catch every possible error because python is a mess why can't you guarantee runtime behavior?
+                except Exception as err:
+                    self.logger.error("Error updating HA: %s", err)
 
     async def power_off(self, standby=False) -> str:
         """
