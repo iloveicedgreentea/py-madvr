@@ -26,6 +26,7 @@ class TestMadvr(unittest.IsolatedAsyncioTestCase):
                 "incoming_frame_rate": "60p",
                 "incoming_color_space": "444",
                 "incoming_bit_depth": "12bit",
+                "is_signal": True,
                 "hdr_flag": True,
                 "incoming_colorimetry": "2020",
                 "incoming_black_levels": "TV",
@@ -43,3 +44,10 @@ class TestMadvr(unittest.IsolatedAsyncioTestCase):
                 "outgoing_black_levels": "TV",
             },
         )
+    async def test_send_command(self):
+        """Verify the send command func works"""
+        await madvr.send_command(["GetIncomingSignalInfo"])
+        await madvr.read_notifications()
+        # s = await madvr.send_command(["GetAspectRatio"])
+
+        print(madvr.msg_dict)

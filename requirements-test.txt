@@ -1,3 +1,5 @@
 python-dotenv
 black
 pylint
+build
+twine
