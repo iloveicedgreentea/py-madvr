@@ -116,19 +116,20 @@ class Madvr:
                 # Test heartbeat
                 self.logger.debug("Handshaking")
 
+                # its possible for the envy to output something while we connect, so this isnt reliable
                 # Make sure first message says WELCOME
-                async with self.reader_lock:
-                    msg_envy = await asyncio.wait_for(
-                        self.reader.readline(),
-                        timeout=10,
-                    )
+                # async with self.reader_lock:
+                #     msg_envy = await asyncio.wait_for(
+                #         self.reader.readline(),
+                #         timeout=10,
+                #     )
 
                 # Check if first 7 char match
-                if self.MADVR_OK != msg_envy[:7]:
-                    # This is fatal, and should not retry. If it doesn't respond as expected something is wrong
-                    raise AckError(
-                        f"Notification did not reply with correct greeting: {msg_envy}"
-                    )
+                # if self.MADVR_OK != msg_envy[:7]:
+                #     # This is fatal, and should not retry. If it doesn't respond as expected something is wrong
+                #     raise AckError(
+                #         f"Notification did not reply with correct greeting: {msg_envy}"
+                #     )
 
                 self.logger.info("Waiting for envy to be available")
                 # envy needs some time to setup new connections
