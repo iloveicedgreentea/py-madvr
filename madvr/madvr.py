@@ -3,7 +3,7 @@ Implements the MadVR protocol
 """
 
 import logging
-from typing import Final, Union
+from typing import Final
 import asyncio
 from madvr.commands import ACKs, Footer, Commands, Enum, Connections
 from madvr.errors import AckError, RetryExceededError, HeartBeatError
@@ -40,8 +40,6 @@ class Madvr:
         # Sockets
         self.reader = None
         self.writer = None
-        self.reader_lock = asyncio.Lock()
-        self.writer_lock = asyncio.Lock()
 
         self.is_closed = False
         # Envy does not have an are you on cmd, just assuming its on based on active connection
@@ -65,13 +63,12 @@ class Madvr:
 
     async def close_connection(self) -> None:
         """close the connection"""
-        async with self.writer_lock:
-            try:
-                self.writer.close()
-                await self.writer.wait_closed()
-            except AttributeError:
-                # means its already closed
-                pass
+        try:
+            self.writer.close()
+            await self.writer.wait_closed()
+        except AttributeError:
+            # means its already closed
+            pass
         self.logger.debug("self.writer is closed")
         self.reader = None
         self.is_closed = True
@@ -107,28 +104,28 @@ class Madvr:
                 self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
 
                 # Command client
-                async with self.reader_lock:
-                    self.reader, self.writer = await asyncio.wait_for(
-                        asyncio.open_connection(self.host, self.port),
-                        timeout=2,
-                    )
+                self.reader, self.writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.host, self.port),
+                    timeout=2,
+                )
 
                 # Test heartbeat
                 self.logger.debug("Handshaking")
 
+                # its possible for the envy to output something while we connect, so this isnt reliable
                 # Make sure first message says WELCOME
-                async with self.reader_lock:
-                    msg_envy = await asyncio.wait_for(
-                        self.reader.readline(),
-                        timeout=10,
-                    )
+                # async with self.reader_lock:
+                #     msg_envy = await asyncio.wait_for(
+                #         self.reader.readline(),
+                #         timeout=10,
+                #     )
 
                 # Check if first 7 char match
-                if self.MADVR_OK != msg_envy[:7]:
-                    # This is fatal, and should not retry. If it doesn't respond as expected something is wrong
-                    raise AckError(
-                        f"Notification did not reply with correct greeting: {msg_envy}"
-                    )
+                # if self.MADVR_OK != msg_envy[:7]:
+                #     # This is fatal, and should not retry. If it doesn't respond as expected something is wrong
+                #     raise AckError(
+                #         f"Notification did not reply with correct greeting: {msg_envy}"
+                #     )
 
                 self.logger.info("Waiting for envy to be available")
                 # envy needs some time to setup new connections
@@ -178,9 +175,8 @@ class Madvr:
         """
         if once:
             try:
-                async with self.writer_lock:
-                    self.writer.write(self.HEARTBEAT)
-                    await self.writer.drain()
+                self.writer.write(self.HEARTBEAT)
+                await self.writer.drain()
 
                 self.logger.debug("heartbeat complete")
             except asyncio.TimeoutError:
@@ -196,9 +192,8 @@ class Madvr:
             # confirm can send heartbeat, ready for commands
             self.logger.debug("Sending heartbeats")
             try:
-                async with self.writer_lock:
-                    self.writer.write(self.HEARTBEAT)
-                    await self.writer.drain()
+                self.writer.write(self.HEARTBEAT)
+                await self.writer.drain()
 
                 self.logger.debug("heartbeat complete")
             except asyncio.TimeoutError:
@@ -324,9 +319,8 @@ class Madvr:
 
         while retry_count < 5:
             try:
-                async with self.writer_lock:
-                    self.writer.write(cmd)
-                    await self.writer.drain()
+                self.writer.write(cmd)
+                await self.writer.drain()
                 break  # if success, break the loop
             except (asyncio.TimeoutError, OSError):
                 self.logger.debug(
@@ -350,17 +344,16 @@ class Madvr:
             # wait until the connection is established
             await self.connection_event.wait()
             try:
-                async with self.reader_lock:
-                    msg = await asyncio.wait_for(
-                        self.reader.read(self.read_limit),
-                        timeout=self.command_read_timeout,
-                    )
+                msg = await asyncio.wait_for(
+                    self.reader.read(self.read_limit),
+                    timeout=self.command_read_timeout,
+                )
             except ConnectionResetError:
                 self.logger.warning(
                     "Connection reset by peer. Attempting to reconnect..."
                 )
                 await self._reconnect()
-            except asyncio.TimeoutError as  err:
+            except asyncio.TimeoutError as err:
                 # if no new notifications, just keep going
                 self.logger.debug("No new notifications to read: %s", err)
             except AttributeError as err:
@@ -384,16 +377,16 @@ class Madvr:
         # for each /r/n split it by title, then the rest are values
         for notification in notifications:
             title, *signal_info = notification.split(" ")
-            
+
             if "NoSignal" in title:
                 self.msg_dict["is_signal"] = False
-            
+
             # dont process empty values
             if not signal_info:
                 continue
             # at least madvr sends attributes in a consistent order
             # could use zip here but why? this works and is simple
-            
+
             if "IncomingSignalInfo" in title:
                 self.msg_dict["is_signal"] = True
                 self.msg_dict["incoming_res"] = signal_info[0]
