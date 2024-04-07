@@ -153,14 +153,14 @@ class Madvr:
             # includes conn refused
             # backoff to not spam HA
             except asyncio.TimeoutError:
-                self.logger.warning("Connecting timeout, retrying in %s seconds", 2)
+                self.logger.debug("Connecting timeout, retrying in %s seconds", 2)
                 await asyncio.sleep(2)
                 continue
 
             # includes conn refused
             # backoff to not spam HA
             except OSError as err:
-                self.logger.warning("Connecting failed, retrying in %s seconds", 2)
+                self.logger.warning("Connecting failed, retrying in %s seconds: %s", 2, err)
                 self.logger.debug(err)
                 await asyncio.sleep(2)
                 continue
