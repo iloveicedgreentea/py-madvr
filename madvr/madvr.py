@@ -41,9 +41,7 @@ class Madvr:
         self.reader = None
         self.writer = None
 
-        self.is_closed = False
         # Envy does not have an are you on cmd, just assuming its on based on active connection
-        self.is_on = False
         self.read_limit = 8000
         self.command_read_timeout = 3
         # self.async_write_ha_state from HA
@@ -63,22 +61,16 @@ class Madvr:
 
     async def close_connection(self) -> None:
         """close the connection"""
+        self.logger.debug("closing connection")
         try:
             self.writer.close()
             await self.writer.wait_closed()
-        except AttributeError:
+        except (ConnectionResetError, AttributeError):
             # means its already closed
             pass
-        self.logger.debug("self.writer is closed")
+        self.writer = None
         self.reader = None
-        self.is_closed = True
-        self.logger.debug("clearing connection event")
         self.connection_event.clear()
-
-        # Clear attr
-        self.logger.debug("clearing attr")
-        await self._clear_attr()
-        self.logger.debug("connection is closed")
 
     async def open_connection(self) -> None:
         """Open a connection"""
@@ -88,6 +80,10 @@ class Madvr:
             await self._reconnect()
         except AckError as err:
             self.logger.error(err)
+
+    def connected(self) -> bool:
+        """Check if the client is connected"""
+        return self.reader is not None and self.writer is not None
 
     def stop(self):
         """Stop reconnecting"""
@@ -106,39 +102,20 @@ class Madvr:
                 # Command client
                 self.reader, self.writer = await asyncio.wait_for(
                     asyncio.open_connection(self.host, self.port),
-                    timeout=2,
+                    timeout=5,
                 )
 
                 # Test heartbeat
                 self.logger.debug("Handshaking")
-
-                # its possible for the envy to output something while we connect, so this isnt reliable
-                # Make sure first message says WELCOME
-                # async with self.reader_lock:
-                #     msg_envy = await asyncio.wait_for(
-                #         self.reader.readline(),
-                #         timeout=10,
-                #     )
-
-                # Check if first 7 char match
-                # if self.MADVR_OK != msg_envy[:7]:
-                #     # This is fatal, and should not retry. If it doesn't respond as expected something is wrong
-                #     raise AckError(
-                #         f"Notification did not reply with correct greeting: {msg_envy}"
-                #     )
 
                 self.logger.info("Waiting for envy to be available")
                 # envy needs some time to setup new connections
                 await asyncio.sleep(3)
 
                 # handshake func
-                await self.send_heartbeat(True)
+                await self.send_heartbeat(once=True)
 
                 self.logger.info("Connection established")
-
-                self.is_on = True
-                self.is_closed = False
-
                 self.connection_event.set()
 
                 return
@@ -160,7 +137,9 @@ class Madvr:
             # includes conn refused
             # backoff to not spam HA
             except OSError as err:
-                self.logger.warning("Connecting failed, retrying in %s seconds: %s", 2, err)
+                self.logger.warning(
+                    "Connecting failed, retrying in %s seconds: %s", 2, err
+                )
                 self.logger.debug(err)
                 await asyncio.sleep(2)
                 continue
@@ -187,7 +166,8 @@ class Madvr:
 
             return
 
-        while True:
+        # wait until connection is established
+        while not self.stop_reconnect.is_set():
             await self.connection_event.wait()
             # confirm can send heartbeat, ready for commands
             self.logger.debug("Sending heartbeats")
@@ -196,11 +176,11 @@ class Madvr:
                 await self.writer.drain()
 
                 self.logger.debug("heartbeat complete")
-            except asyncio.TimeoutError:
-                self.logger.error("timeout when sending heartbeat")
-            except OSError:
-                self.logger.error("error when sending heartbeat")
-                await self._reconnect()
+            except asyncio.TimeoutError as err:
+                self.logger.error("timeout when sending heartbeat %s", err)
+            except OSError as err:
+                self.logger.error("error when sending heartbeat %s", err)
+                # await self._reconnect()
             finally:
                 # Wait some time before the next heartbeat
                 await asyncio.sleep(15)
@@ -237,15 +217,12 @@ class Madvr:
             # if valuerror it means theres just one command like PowerOff, so use that directly
             except ValueError as err:
                 self.logger.debug(err)
-                self.logger.debug("Using raw_command directly")
                 command = raw_command[0]
                 skip_val = True
         # if there are more than three values, this is incorrect, error
         elif len(raw_command) > 3:
-            self.logger.error("More than three command values provided.")
             raise NotImplementedError(f"Too many values provided {raw_command}")
         else:
-            self.logger.debug("command is a list")
             # else a command was provided as a proper list ['keypress', 'menu']
             # raw command will be a list of 2+
             command, *values = raw_command
@@ -301,18 +278,19 @@ class Madvr:
         try:
             cmd, enum_type = await self._construct_command(command)
         except NotImplementedError as err:
-            self.logger.error("command not implemented: %s -- %s", command, err)
+            self.logger.warning("command not implemented: %s -- %s", command, err)
             return f"Command not found: {command}"
 
         self.logger.debug("using values: %s %s", cmd, enum_type)
 
         # reconnect if client is not init or its off
-        if self.reader is None or self.is_on is False:
-            # Don't reconnect if poweroff or standby because HA will complain
-            if "PowerOff" in command or "Standby" in command:
-                return ""
-            self.logger.debug("Connection lost - restarting connection")
-            await self._reconnect()
+        # should not be necessary because of ping_until_alive
+        # if self.reader is None or self.is_on is False:
+        #     # Don't reconnect if poweroff or standby because HA will complain
+        #     if "PowerOff" in command or "Standby" in command:
+        #         return ""
+        #     self.logger.debug("Connection lost - restarting connection")
+        #     await self._reconnect()
 
         # simple retry logic
         retry_count = 0
@@ -321,20 +299,23 @@ class Madvr:
             try:
                 self.writer.write(cmd)
                 await self.writer.drain()
-                break  # if success, break the loop
-            except (asyncio.TimeoutError, OSError):
+                return "ok"  # if success, break the loop
+            except ConnectionResetError as err:
+                # for now just assuming the envy was turned off
+                self.logger.warning(
+                    "Connection reset by peer. Assuming envy was turned off manually"
+                )
+                raise ConnectionResetError("Connection reset by peer") from err
+            except (asyncio.TimeoutError, OSError) as err:
                 self.logger.debug(
-                    "OK receipt timed out or connection failed when reading OK, retrying"
+                    "OK receipt timed out or connection failed when reading OK, retrying - %s",
+                    err,
                 )
                 retry_count += 1
-                await asyncio.sleep(1)  # sleep before retrying
+                await asyncio.sleep(0.2)  # sleep before retrying
                 continue
 
-        if retry_count == 5:  # if we got here something went wrong
-            await self.close_connection()
-            await self._reconnect()
-
-        return ""
+        raise RetryExceededError("Retry exceeded")
 
     async def read_notifications(self) -> None:
         """
@@ -348,11 +329,10 @@ class Madvr:
                     self.reader.read(self.read_limit),
                     timeout=self.command_read_timeout,
                 )
+                await self._process_notifications(msg.decode("utf-8"))
             except ConnectionResetError:
-                self.logger.warning(
-                    "Connection reset by peer. Attempting to reconnect..."
-                )
-                await self._reconnect()
+                self.logger.debug("Connection reset by peer. Probably off")
+                await self.close_connection()
             except asyncio.TimeoutError as err:
                 # if no new notifications, just keep going
                 self.logger.debug("No new notifications to read: %s", err)
@@ -364,11 +344,8 @@ class Madvr:
                 self.logger.error("Reading notifications failed or timed out: %s", err)
                 continue
 
-            if not msg:
-                await asyncio.sleep(0.1)
-                continue
-
-            await self._process_notifications(msg.decode("utf-8"))
+            await asyncio.sleep(0.1)
+            continue
 
     async def _process_notifications(self, msg: str) -> None:
         """Parse a message and store the attributes and values in a dictionary"""
@@ -431,28 +408,21 @@ class Madvr:
 
     async def power_off(self, standby=False) -> str:
         """
-        turn off madvr it must have a render thread active at the moment
-        once it is off, you can't turn it back on unless standby=True
-        It uses about 30w idle on standby. I use IR via harmony to turn it on
+        turn off madvr
 
         standby: bool -> standby instead of poweroff if true
         """
-        # dont do anything if its off besides mark it off
-        # sending command will open connection
         try:
             # stop trying to reconnect
-            self.logger.debug("setting stop reconnect")
             self.stop()
-            self.logger.debug("sending power off command")
             res = await self.send_command(["Standby"] if standby else ["PowerOff"])
-            self.logger.debug("closing connection")
-            await self.close_connection()
-            self.is_on = False
-            self.logger.debug("finished power_off")
             return res
-
+        except ConnectionResetError:
+            pass
         except RetryExceededError:
             return "Retries Exceeded"
+        finally:
+            await self.close_connection()
 
     def print_commands(self) -> str:
         """
