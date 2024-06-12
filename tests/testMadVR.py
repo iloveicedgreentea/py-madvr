@@ -8,8 +8,10 @@ from madvr.madvr import Madvr
 
 madvr = Madvr(host="192.168.88.38", port=44077)
 
+
 # write a class to test the madvr class
 class TestMadvr(unittest.IsolatedAsyncioTestCase):
+    
     async def test_process_info(self):
         """Verify the process info func works to assign attrs, with modifications"""
         await madvr._process_notifications(
@@ -44,10 +46,10 @@ class TestMadvr(unittest.IsolatedAsyncioTestCase):
                 "outgoing_black_levels": "TV",
             },
         )
+
     async def test_send_command(self):
         """Verify the send command func works"""
         await madvr.send_command(["GetIncomingSignalInfo"])
         await madvr.read_notifications()
-        # s = await madvr.send_command(["GetAspectRatio"])
 
         print(madvr.msg_dict)

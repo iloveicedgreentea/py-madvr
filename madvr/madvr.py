@@ -7,12 +7,13 @@ from typing import Final
 import asyncio
 from madvr.commands import ACKs, Footer, Commands, Enum, Connections
 from madvr.errors import AckError, RetryExceededError, HeartBeatError
+import os  # For ping functionality
 
 
 class Madvr:
     """MadVR Control"""
 
-    # pylint: disable=too-many-instance-attributes
+    # pylint: disable=too-many-arguments
     def __init__(
         self,
         host: str,
@@ -20,15 +21,23 @@ class Madvr:
         logger: logging.Logger = logging.getLogger(__name__),
         port: int = 44077,
         connect_timeout: int = 5,
+        heartbeat_interval: int = 15,
+        ping_interval: int = 5,
     ):
         self.host = host
         self.port = port
         self.connect_timeout: int = connect_timeout
+        self.heartbeat_interval: int = heartbeat_interval
+        self.ping_interval: int = ping_interval
         self.logger = logger
 
         # used to indicate if connection is ready
         self.connection_event = asyncio.Event()
         self.stop_reconnect = asyncio.Event()
+        self.stop_heartbeat = asyncio.Event()
+        self.stop_ping = asyncio.Event()
+        self.heartbeat_task = None
+        self.ping_task = None
 
         # Const values
         self.MADVR_OK: Final = Connections.welcome.value
@@ -41,9 +50,9 @@ class Madvr:
         self.reader = None
         self.writer = None
 
-        # Envy does not have an are you on cmd, just assuming its on based on active connection
         self.read_limit = 8000
         self.command_read_timeout = 3
+
         # self.async_write_ha_state from HA
         self.update_callback = None
 
@@ -66,7 +75,6 @@ class Madvr:
             self.writer.close()
             await self.writer.wait_closed()
         except (ConnectionResetError, AttributeError):
-            # means its already closed
             pass
         self.writer = None
         self.reader = None
@@ -88,6 +96,8 @@ class Madvr:
     def stop(self):
         """Stop reconnecting"""
         self.stop_reconnect.set()
+        self.stop_heartbeat.set()
+        self.stop_ping.set()
 
     async def _reconnect(self) -> None:
         """
@@ -96,53 +106,50 @@ class Madvr:
         Raises AckError
         """
         while not self.stop_reconnect.is_set():
-            try:
-                self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
+            if await self.ping_device():
+                try:
+                    self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
 
-                # Command client
-                self.reader, self.writer = await asyncio.wait_for(
-                    asyncio.open_connection(self.host, self.port),
-                    timeout=5,
+                    # Command client
+                    self.reader, self.writer = await asyncio.wait_for(
+                        asyncio.open_connection(self.host, self.port),
+                        timeout=5,
+                    )
+                    self.logger.debug("Handshaking")
+                    self.logger.info("Waiting for envy to be available")
+                    await asyncio.sleep(3)
+                    await self.send_heartbeat(once=True)
+                    self.logger.info("Connection established")
+                    self.connection_event.set()
+                    asyncio.create_task(self.send_heartbeat())
+                    return
+                except HeartBeatError:
+                    self.logger.warning(
+                        "Error sending heartbeat, retrying in %s seconds", 2
+                    )
+                    await asyncio.sleep(2)
+                except asyncio.TimeoutError:
+                    self.logger.debug("Connecting timeout, retrying in %s seconds", 2)
+                    await asyncio.sleep(2)
+                except OSError as err:
+                    self.logger.warning(
+                        "Connecting failed, retrying in %s seconds: %s", 2, err
+                    )
+                    self.logger.debug(err)
+                    await asyncio.sleep(2)
+            else:
+                self.logger.debug(
+                    "Device not responding to ping, retrying in %s seconds",
+                    self.ping_interval,
                 )
+                await asyncio.sleep(self.ping_interval)
 
-                # Test heartbeat
-                self.logger.debug("Handshaking")
-
-                self.logger.info("Waiting for envy to be available")
-                # envy needs some time to setup new connections
-                await asyncio.sleep(3)
-
-                # handshake func
-                await self.send_heartbeat(once=True)
-
-                self.logger.info("Connection established")
-                self.connection_event.set()
-
-                return
-
-            except HeartBeatError:
-                self.logger.warning(
-                    "Error sending heartbeat, retrying in %s seconds", 2
-                )
-                await asyncio.sleep(2)
-                continue
-
-            # includes conn refused
-            # backoff to not spam HA
-            except asyncio.TimeoutError:
-                self.logger.debug("Connecting timeout, retrying in %s seconds", 2)
-                await asyncio.sleep(2)
-                continue
-
-            # includes conn refused
-            # backoff to not spam HA
-            except OSError as err:
-                self.logger.warning(
-                    "Connecting failed, retrying in %s seconds: %s", 2, err
-                )
-                self.logger.debug(err)
-                await asyncio.sleep(2)
-                continue
+    async def ping_device(self) -> bool:
+        """
+        Ping the device to see if it is online
+        """
+        response = os.system(f"ping -c 1 {self.host}")
+        return response == 0
 
     async def send_heartbeat(self, once=False) -> None:
         """
@@ -156,34 +163,27 @@ class Madvr:
             try:
                 self.writer.write(self.HEARTBEAT)
                 await self.writer.drain()
-
                 self.logger.debug("heartbeat complete")
             except asyncio.TimeoutError:
                 self.logger.error("timeout when sending heartbeat")
             except OSError:
                 self.logger.error("error when sending heartbeat")
                 await self._reconnect()
-
             return
 
         # wait until connection is established
-        while not self.stop_reconnect.is_set():
+        while not self.stop_heartbeat.is_set():
             await self.connection_event.wait()
-            # confirm can send heartbeat, ready for commands
-            self.logger.debug("Sending heartbeats")
             try:
                 self.writer.write(self.HEARTBEAT)
                 await self.writer.drain()
-
                 self.logger.debug("heartbeat complete")
             except asyncio.TimeoutError as err:
                 self.logger.error("timeout when sending heartbeat %s", err)
             except OSError as err:
                 self.logger.error("error when sending heartbeat %s", err)
-                # await self._reconnect()
             finally:
-                # Wait some time before the next heartbeat
-                await asyncio.sleep(15)
+                await asyncio.sleep(self.heartbeat_interval)
 
     async def _construct_command(self, raw_command: list[str]) -> tuple[bytes, str]:
         """
@@ -198,7 +198,6 @@ class Madvr:
         self.logger.debug(
             "raw_command: %s -- raw_command length: %s", raw_command, len(raw_command)
         )
-
         skip_val = False
         # HA seems to always send commands as a list even if you set them as a str
 
@@ -206,7 +205,7 @@ class Madvr:
 
         # If len is 1 like ["keypress,val"], then try to split, otherwise its just one word
         # sent directly from HA send_command
-        if len(raw_command) == 1:  # if its a list
+        if len(raw_command) == 1:
             try:
                 # ['key_press, menu'] -> 'key_press', ['menu']
                 # ['activate_profile, SOURCE, 1'] -> 'activate_profile', ['SOURCE', '1']
@@ -219,7 +218,6 @@ class Madvr:
                 self.logger.debug(err)
                 command = raw_command[0]
                 skip_val = True
-        # if there are more than three values, this is incorrect, error
         elif len(raw_command) > 3:
             raise NotImplementedError(f"Too many values provided {raw_command}")
         else:
@@ -326,15 +324,13 @@ class Madvr:
             await self.connection_event.wait()
             try:
                 msg = await asyncio.wait_for(
-                    self.reader.read(self.read_limit),
-                    timeout=self.command_read_timeout,
+                    self.reader.read(self.read_limit), timeout=self.command_read_timeout
                 )
                 await self._process_notifications(msg.decode("utf-8"))
             except ConnectionResetError:
                 self.logger.debug("Connection reset by peer. Probably off")
                 await self.close_connection()
             except asyncio.TimeoutError as err:
-                # if no new notifications, just keep going
                 self.logger.debug("No new notifications to read: %s", err)
             except AttributeError as err:
                 self.logger.error("Attribute error with notifications: %s", err)
@@ -343,7 +339,6 @@ class Madvr:
             except OSError as err:
                 self.logger.error("Reading notifications failed or timed out: %s", err)
                 continue
-
             await asyncio.sleep(0.1)
             continue
 
@@ -440,7 +435,6 @@ class Madvr:
             print(f"\t{command}")
 
         print("\n")
-        # Print all options
         print("Currently Supported Parameters:")
         from madvr import commands
         import inspect

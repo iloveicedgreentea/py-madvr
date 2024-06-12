@@ -1,6 +1,7 @@
 """
 All the enums for commands
 """
+
 from enum import Enum
 
 
@@ -10,8 +11,10 @@ class Connections(Enum):
     heartbeat = b"Heartbeat\r\n"
     bye = b"Bye\r\n"
 
+
 class Footer(Enum):
     footer = b"\x0D\x0A"
+
 
 class Headers(Enum):
     temperature = b"Temperatures"
@@ -25,21 +28,27 @@ class Headers(Enum):
     config_page = b"ConfigPage"
     option = b"Option"
 
+
 class ACKs(Enum):
     reply = b"OK\r\n"
     error = b"ERROR"
 
+
 class Temperatures(Enum):
     msg = "Temperatures"
+
 
 class SignalInfo(Enum):
     msg = "IncomingSignalInfo"
 
+
 class OutgoingSignalInfo(Enum):
     msg = "OutgoingSignalInfo"
 
+
 class AspectRatio(Enum):
     msg = "AspectRatio"
+
 
 class Notifications(Enum):
     ActivateProfile = b"ActivateProfile"
@@ -47,6 +56,7 @@ class Notifications(Enum):
     OngoingSignalInfo = b"OngoingSignalInfo"
     AspectRatio = b"AspectRatio"
     MaskingRatio = b"MaskingRatio"
+
 
 class KeyPress(Enum):
     MENU = b"MENU"
@@ -63,37 +73,46 @@ class KeyPress(Enum):
     YELLOW = b"YELLOW"
     POWER = b"POWER"
 
+
 class DisplayAlert(Enum):
     pass
+
 
 class Information(Enum):
     pass
 
+
 class SettingsPages(Enum):
     pass
+
 
 class Toggle(Enum):
     pass
 
+
 class SingleCmd(Enum):
     """for things that are single words"""
+
 
 class IsInformational(Enum):
     true = True
     false = False
+
 
 class Menus(Enum):
     Info = b"Info"
     Settings = b"Settings"
     Configuration = b"Configuration"
     Profiles = b"Profiles"
-    TestPatterns = b"TestPatterns" 
+    TestPatterns = b"TestPatterns"
+
 
 class Profiles(Enum):
     SOURCE = b"SOURCE"
     DISPLAY = b"DISPLAY"
-    # CUSTOM 2 
+    # CUSTOM 2
     CUSTOM = b"CUSTOM"
+
 
 class Commands(Enum):
     # Power stuff
@@ -113,7 +132,11 @@ class Commands(Enum):
     KeyHold = b"KeyHold", KeyPress, IsInformational.false
 
     GetIncomingSignalInfo = b"GetIncomingSignalInfo", SignalInfo, IsInformational.true
-    GetOutgoingSignalInfo = b"GetOutgoingSignalInfo", OutgoingSignalInfo, IsInformational.true
+    GetOutgoingSignalInfo = (
+        b"GetOutgoingSignalInfo",
+        OutgoingSignalInfo,
+        IsInformational.true,
+    )
     GetAspectRatio = b"GetAspectRatio", AspectRatio, IsInformational.true
     GetMaskingRatio = b"GetMaskingRatio", SingleCmd, IsInformational.true
     GetTemperatures = b"GetTemperatures", Temperatures, IsInformational.true
