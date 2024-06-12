@@ -77,8 +77,9 @@ class Madvr:
         """close the connection"""
         self.logger.debug("closing connection")
         try:
-            self.writer.close()
-            await self.writer.wait_closed()
+            if self.writer:
+                self.writer.close()
+                await self.writer.wait_closed()
         except (ConnectionResetError, AttributeError):
             pass
         self.writer = None
@@ -95,10 +96,10 @@ class Madvr:
         try:
             self.stop_reconnect.clear()
             await self._reconnect()
+            self.logger.debug("Connection opened")
             if self.heartbeat_task is None or self.heartbeat_task.done():
+                self.logger.debug("Starting heartbeat task")
                 self.heartbeat_task = asyncio.create_task(self.send_heartbeat())
-            if not self.device_on and (self.ping_task is None or self.ping_task.done()):
-                self.ping_task = asyncio.create_task(self.ping_until_alive())
         except AckError as err:
             self.logger.error(err)
 
@@ -134,7 +135,9 @@ class Madvr:
         Raises AckError
         """
         while not self.stop_reconnect.is_set():
+            # if its on, it should ping
             if await self.ping_device():
+                self.logger.debug("Device is online")
                 try:
                     self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
 
@@ -150,6 +153,7 @@ class Madvr:
                     self.logger.info("Connection established")
                     self.connection_event.set()
                     self.device_on = True  # update state
+
                     return
                 except HeartBeatError:
                     self.logger.warning(
@@ -176,7 +180,7 @@ class Madvr:
         """
         Ping the device to see if it is online
         """
-        response = os.system(f"ping -c 1 {self.host}")
+        response = os.system(f"ping -c 1 -W 2 {self.host}")
         return response == 0
 
     async def send_heartbeat(self, once=False) -> None:
@@ -427,8 +431,8 @@ class Madvr:
             if self.update_callback is not None:
                 try:
                     self.update_callback()
-                # catch every possible error because python is a mess why can't you guarantee runtime behavior?
-                except Exception as err:
+                # catch every possible error because python is a mess why can't you just guarantee runtime behavior?
+                except Exception as err:  # pylint: disable=broad-except
                     self.logger.error("Error updating HA: %s", err)
 
     async def power_off(self, standby=False) -> str:

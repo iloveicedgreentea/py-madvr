@@ -1,5 +1,6 @@
 """Errors for madvr"""
 
+
 class AckError(Exception):
     """An error when ACK is not correct"""
 

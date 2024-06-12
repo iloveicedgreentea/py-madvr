@@ -3,3 +3,5 @@ black
 pylint
 build
 twine
+pytest 
+pytest-asyncio
