@@ -35,9 +35,13 @@ class Madvr:
         self.connection_event = asyncio.Event()
         self.stop_reconnect = asyncio.Event()
         self.stop_heartbeat = asyncio.Event()
-        self.stop_ping = asyncio.Event()
         self.heartbeat_task = None
         self.ping_task = None
+
+        # delay before pinging again after disconnect
+        self.ping_delay = 15
+        # track the device state
+        self.device_on = False
 
         # Const values
         self.MADVR_OK: Final = Connections.welcome.value
@@ -59,6 +63,7 @@ class Madvr:
         self.logger.debug("Running in debug mode")
 
     def set_update_callback(self, callback):
+        """Function to set the callback for updating HA state"""
         self.update_callback = callback
 
     async def _clear_attr(self) -> None:
@@ -79,6 +84,10 @@ class Madvr:
         self.writer = None
         self.reader = None
         self.connection_event.clear()
+        self.device_on = False  # update state
+        await asyncio.sleep(self.ping_delay)  # delay before pinging again
+        if self.ping_task is None or self.ping_task.done():
+            self.ping_task = asyncio.create_task(self.ping_until_alive())
 
     async def open_connection(self) -> None:
         """Open a connection"""
@@ -86,6 +95,10 @@ class Madvr:
         try:
             self.stop_reconnect.clear()
             await self._reconnect()
+            if self.heartbeat_task is None or self.heartbeat_task.done():
+                self.heartbeat_task = asyncio.create_task(self.send_heartbeat())
+            if not self.device_on and (self.ping_task is None or self.ping_task.done()):
+                self.ping_task = asyncio.create_task(self.ping_until_alive())
         except AckError as err:
             self.logger.error(err)
 
@@ -97,7 +110,22 @@ class Madvr:
         """Stop reconnecting"""
         self.stop_reconnect.set()
         self.stop_heartbeat.set()
-        self.stop_ping.set()
+
+        if self.heartbeat_task:
+            self.heartbeat_task.cancel()
+
+    async def ping_until_alive(self):
+        """Ping the device until it is online"""
+        while not self.device_on:
+            if await self.ping_device():
+                self.logger.info("Device is online")
+                await self.open_connection()
+                return
+
+            self.logger.debug(
+                "Device is offline, retrying in %s seconds", self.ping_interval
+            )
+            await asyncio.sleep(self.ping_interval)
 
     async def _reconnect(self) -> None:
         """
@@ -121,7 +149,7 @@ class Madvr:
                     await self.send_heartbeat(once=True)
                     self.logger.info("Connection established")
                     self.connection_event.set()
-                    asyncio.create_task(self.send_heartbeat())
+                    self.device_on = True  # update state
                     return
                 except HeartBeatError:
                     self.logger.warning(
@@ -171,7 +199,6 @@ class Madvr:
                 await self._reconnect()
             return
 
-        # wait until connection is established
         while not self.stop_heartbeat.is_set():
             await self.connection_event.wait()
             try:
@@ -182,6 +209,9 @@ class Madvr:
                 self.logger.error("timeout when sending heartbeat %s", err)
             except OSError as err:
                 self.logger.error("error when sending heartbeat %s", err)
+                self.device_on = False  # update state
+                if self.ping_task is None or self.ping_task.done():
+                    self.ping_task = asyncio.create_task(self.ping_until_alive())
             finally:
                 await asyncio.sleep(self.heartbeat_interval)
 
