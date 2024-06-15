@@ -105,9 +105,7 @@ class Madvr:
         self.logger.debug("Starting open connection")
         try:
             self.stop_reconnect.clear()
-            # if ping is not running, try to connect in the background
-            if self.ping_task is None or self.ping_task.done():
-                self.ping_task = asyncio.create_task(self._reconnect())
+            await self._reconnect()
             self.logger.debug("Connection opened")
             if self.heartbeat_task is None or self.heartbeat_task.done():
                 self.logger.debug("Starting heartbeat task")
