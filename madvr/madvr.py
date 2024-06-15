@@ -38,6 +38,8 @@ class Madvr:
         self.heartbeat_task = None
         self.ping_task = None
 
+        self.lock = asyncio.Lock()
+
         # delay before pinging again after disconnect
         self.ping_delay = 15
         # track the device state
@@ -62,6 +64,11 @@ class Madvr:
 
         self.logger.debug("Running in debug mode")
 
+    @property
+    def is_on(self) -> bool:
+        """Return true if the device is on."""
+        return self.device_on
+
     def set_update_callback(self, callback):
         """Function to set the callback for updating HA state"""
         self.update_callback = callback
@@ -71,7 +78,9 @@ class Madvr:
         Clear instance attr so HA doesn't report stale values
         """
         # Incoming attrs
-        self.msg_dict = {}
+        self.msg_dict = {"is_on": False}  # Clear attributes and set 'is_on' to False
+        if self.update_callback:
+            self.update_callback(self.msg_dict)
 
     async def close_connection(self) -> None:
         """close the connection"""
@@ -86,6 +95,7 @@ class Madvr:
         self.reader = None
         self.connection_event.clear()
         self.device_on = False  # update state
+        self._clear_attr()
         await asyncio.sleep(self.ping_delay)  # delay before pinging again
         if self.ping_task is None or self.ping_task.done():
             self.ping_task = asyncio.create_task(self.ping_until_alive())
@@ -155,6 +165,7 @@ class Madvr:
                     self.device_on = True  # update state
 
                     return
+
                 except HeartBeatError:
                     self.logger.warning(
                         "Error sending heartbeat, retrying in %s seconds", 2
@@ -193,8 +204,9 @@ class Madvr:
         """
         if once:
             try:
-                self.writer.write(self.HEARTBEAT)
-                await self.writer.drain()
+                async with self.lock:
+                    self.writer.write(self.HEARTBEAT)
+                    await self.writer.drain()
                 self.logger.debug("heartbeat complete")
             except asyncio.TimeoutError:
                 self.logger.error("timeout when sending heartbeat")
@@ -206,8 +218,9 @@ class Madvr:
         while not self.stop_heartbeat.is_set():
             await self.connection_event.wait()
             try:
-                self.writer.write(self.HEARTBEAT)
-                await self.writer.drain()
+                async with self.lock:
+                    self.writer.write(self.HEARTBEAT)
+                    await self.writer.drain()
                 self.logger.debug("heartbeat complete")
             except asyncio.TimeoutError as err:
                 self.logger.error("timeout when sending heartbeat %s", err)
@@ -315,22 +328,14 @@ class Madvr:
 
         self.logger.debug("using values: %s %s", cmd, enum_type)
 
-        # reconnect if client is not init or its off
-        # should not be necessary because of ping_until_alive
-        # if self.reader is None or self.is_on is False:
-        #     # Don't reconnect if poweroff or standby because HA will complain
-        #     if "PowerOff" in command or "Standby" in command:
-        #         return ""
-        #     self.logger.debug("Connection lost - restarting connection")
-        #     await self._reconnect()
-
         # simple retry logic
         retry_count = 0
 
         while retry_count < 5:
             try:
-                self.writer.write(cmd)
-                await self.writer.drain()
+                async with self.lock:
+                    self.writer.write(cmd)
+                    await self.writer.drain()
                 return "ok"  # if success, break the loop
             except ConnectionResetError as err:
                 # for now just assuming the envy was turned off
@@ -427,10 +432,11 @@ class Madvr:
                 self.msg_dict["profile_name"] = signal_info[0]
                 self.msg_dict["profile_num"] = signal_info[1]
 
-            # update state immediately
+            # push HA state
             if self.update_callback is not None:
                 try:
-                    self.update_callback()
+                    # pass data to HA
+                    self.update_callback(self.msg_dict)
                 # catch every possible error because python is a mess why can't you just guarantee runtime behavior?
                 except Exception as err:  # pylint: disable=broad-except
                     self.logger.error("Error updating HA: %s", err)
