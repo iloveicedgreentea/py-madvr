@@ -111,8 +111,12 @@ class Madvr:
             self.logger.error(err)
 
     def connected(self) -> bool:
-        """Check if the client is connected"""
-        return self.reader is not None and self.writer is not None
+        """Check if the client is connected."""
+        return (
+            self.reader is not None
+            and self.writer is not None
+            and not self.reader.at_eof()
+        )
 
     def stop(self):
         """Stop reconnecting"""
@@ -124,7 +128,7 @@ class Madvr:
 
     async def ping_until_alive(self):
         """Ping the device until it is online then connect to it"""
-        while not self.connected():
+        while True:
             if self.powered_off_recently:
                 self.logger.debug(
                     "Device was recently powered off, waiting for %s seconds",
@@ -134,8 +138,9 @@ class Madvr:
                 self.powered_off_recently = False
 
             if await self.ping_device():
-                self.logger.info("Device is pingable, attempting to connect")
-                await self.open_connection()
+                if not self.connected():
+                    self.logger.debug("Device is pingable, attempting to connect")
+                    await self.open_connection()
             else:
                 self.logger.debug(
                     "Device is offline, retrying in %s seconds", self.ping_interval
