@@ -96,6 +96,7 @@ class Madvr:
         self.reader = None
         self.connection_event.clear()
         self.device_on = False  # update state
+        self.msg_dict["is_on"] = self.device_on
         await self._clear_attr()
 
     async def open_connection(self) -> None:
@@ -178,6 +179,7 @@ class Madvr:
                 self.logger.info("Connection established")
                 self.connection_event.set()
                 self.device_on = True  # update state
+                self.msg_dict["is_on"] = self.device_on
 
             except HeartBeatError:
                 self.logger.warning(
@@ -241,6 +243,7 @@ class Madvr:
             except OSError as err:
                 self.logger.error("error when sending heartbeat %s", err)
                 self.device_on = False  # update state
+                self.msg_dict["is_on"] = self.device_on
                 if self.ping_task is None or self.ping_task.done():
                     self.ping_task = asyncio.create_task(self.ping_until_alive())
             finally:
