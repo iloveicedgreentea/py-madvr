@@ -137,10 +137,14 @@ class Madvr:
                 await asyncio.sleep(self.ping_delay_after_power_off)
                 self.powered_off_recently = False
 
+            # if its powered off out of band, this can cause a false positive
             if await self.ping_device():
-                if not self.connected():
-                    self.logger.debug("Device is pingable, attempting to connect")
-                    await self.open_connection()
+                # wait a few seconds and confirm the ping
+                await asyncio.sleep(2)
+                if await self.ping_device():
+                    if not self.connected():
+                        self.logger.debug("Device is pingable, attempting to connect")
+                        await self.open_connection()
             else:
                 self.logger.debug(
                     "Device is offline, retrying in %s seconds", self.ping_interval
@@ -180,15 +184,10 @@ class Madvr:
                     "Error sending heartbeat, retrying in %s seconds", 2
                 )
                 await asyncio.sleep(2)
-            except asyncio.TimeoutError:
-                self.logger.debug("Connecting timeout, retrying in %s seconds", 2)
-                await asyncio.sleep(2)
+            except TimeoutError:
+                self.logger.debug("Connecting timed out")
             except OSError as err:
-                self.logger.warning(
-                    "Connecting failed, retrying in %s seconds: %s", 2, err
-                )
-                self.logger.debug(err)
-                await asyncio.sleep(2)
+                self.logger.debug("Connecting failed %s", err)
         else:
             self.logger.debug(
                 "Device not responding to ping, retrying in %s seconds",
@@ -213,6 +212,9 @@ class Madvr:
         """
         if once:
             try:
+                if not self.connected():
+                    self.logger.warning("Connection not established, retrying")
+                    await self._reconnect()
                 async with self.lock:
                     self.writer.write(self.HEARTBEAT)
                     await self.writer.drain()
@@ -227,6 +229,9 @@ class Madvr:
         while not self.stop_heartbeat.is_set():
             await self.connection_event.wait()
             try:
+                if not self.connected():
+                    self.logger.warning("Connection not established, retrying")
+                    await self._reconnect()
                 async with self.lock:
                     self.writer.write(self.HEARTBEAT)
                     await self.writer.drain()
@@ -342,6 +347,11 @@ class Madvr:
 
         while retry_count < 5:
             try:
+                if not self.connected():
+                    self.logger.warning("Connection not established, retrying")
+                    await self._reconnect()
+                    retry_count += 1
+                    continue
                 async with self.lock:
                     self.writer.write(cmd)
                     await self.writer.drain()
@@ -397,6 +407,12 @@ class Madvr:
         # for each /r/n split it by title, then the rest are values
         for notification in notifications:
             title, *signal_info = notification.split(" ")
+
+            # detect if it was turned off out of band
+            if "PowerOff" in title:
+                self.msg_dict["is_on"] = False
+                self.powered_off_recently = True
+                self.power_off()
 
             if "NoSignal" in title:
                 self.msg_dict["is_signal"] = False
@@ -459,8 +475,9 @@ class Madvr:
         try:
             # stop trying to reconnect
             self.stop()
-            res = await self.send_command(["Standby"] if standby else ["PowerOff"])
-            return res
+            if self.connected():
+                res = await self.send_command(["Standby"] if standby else ["PowerOff"])
+                return res
         except ConnectionResetError:
             pass
         except RetryExceededError:
