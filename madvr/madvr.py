@@ -407,12 +407,13 @@ class Madvr:
         # for each /r/n split it by title, then the rest are values
         for notification in notifications:
             title, *signal_info = notification.split(" ")
-
+            self.logger.debug("Processing notification Title: %s", title)
             # detect if it was turned off out of band
             if "PowerOff" in title:
                 self.msg_dict["is_on"] = False
                 self.powered_off_recently = True
-                self.power_off()
+                self.stop()
+                await self.close_connection()
 
             if "NoSignal" in title:
                 self.msg_dict["is_signal"] = False
