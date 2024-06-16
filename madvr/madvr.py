@@ -145,6 +145,10 @@ class Madvr:
                 self.logger.debug(
                     "Device is offline, retrying in %s seconds", self.ping_interval
                 )
+                # if its marked as connected still, then close the connection
+                if self.connected():
+                    self.stop()
+                    await self.close_connection()
             await asyncio.sleep(self.ping_interval)
 
     async def _reconnect(self) -> None:
