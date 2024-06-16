@@ -371,9 +371,10 @@ class Madvr:
                     self.reader.read(self.read_limit), timeout=self.command_read_timeout
                 )
                 await self._process_notifications(msg.decode("utf-8"))
+            except TimeoutError:
+                self.logger.debug("No notifications to read")
             except (
                 ConnectionResetError,
-                asyncio.TimeoutError,
                 AttributeError,
                 BrokenPipeError,
                 OSError,
@@ -381,6 +382,7 @@ class Madvr:
                 self.logger.error("Reading notifications failed or timed out: %s", err)
                 await self._reconnect()
                 continue
+
             await asyncio.sleep(0.1)
             continue
 
