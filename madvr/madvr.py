@@ -8,6 +8,7 @@ import asyncio
 from madvr.commands import ACKs, Footer, Commands, Enum, Connections
 from madvr.errors import AckError, RetryExceededError, HeartBeatError
 import os  # For ping functionality
+from madvr.wol import send_magic_packet
 
 
 class Madvr:
@@ -20,12 +21,14 @@ class Madvr:
         # Can supply a logger object. It can hook into the HA logger
         logger: logging.Logger = logging.getLogger(__name__),
         port: int = 44077,
+        mac: str = "",
         connect_timeout: int = 5,
         heartbeat_interval: int = 15,
         ping_interval: int = 5,
     ):
         self.host = host
         self.port = port
+        self.mac = mac
         self.connect_timeout: int = connect_timeout
         self.heartbeat_interval: int = heartbeat_interval
         self.ping_interval: int = ping_interval
@@ -469,6 +472,12 @@ class Madvr:
                 # catch every possible error because python is a mess why can't you just guarantee runtime behavior?
                 except Exception as err:  # pylint: disable=broad-except
                     self.logger.error("Error updating HA: %s", err)
+
+    async def power_on(self) -> None:
+        """
+        Power on the device with a magic packet
+        """
+        send_magic_packet(self.mac, logger=self.logger)
 
     async def power_off(self, standby=False) -> str:
         """
