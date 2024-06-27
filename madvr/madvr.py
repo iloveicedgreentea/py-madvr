@@ -140,6 +140,15 @@ class Madvr:
             self.logger.debug("Connection opened")
         except AckError as err:
             self.logger.error(err)
+        # once connected, try to refresh data once in the case the device was turned connected to while on already
+        cmds = [
+            ["GetIncomingSignalInfo"],
+            ["GetOutgoingSignalInfo"],
+            ["GetAspectRatio"],
+            ["GetMaskingRatio"],
+        ]
+        for cmd in cmds:
+            await self.add_command_to_queue(cmd)
 
     def connected(self) -> bool:
         """Check if the client is connected."""
