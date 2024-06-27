@@ -64,14 +64,14 @@ class Madvr:
         self.reader = None
         self.writer = None
 
-        self.read_limit = 8000
-        self.command_read_timeout = 3
+        self.read_limit: int = 8000
+        self.command_read_timeout: int = 3
 
         # self.async_write_ha_state from HA
-        self.update_callback = None
+        self.update_callback: Any = None
 
         self.notification_processor = NotificationProcessor(self.logger)
-        self.powered_off_recently = False
+        self.powered_off_recently: bool = False
         self.ping_delay_after_power_off: int = 30
         self.logger.debug("Running in debug mode")
 
@@ -98,6 +98,10 @@ class Madvr:
 
         task_hb = self.loop.create_task(self.send_heartbeat())
         self.tasks.append(task_hb)
+
+        # this will only be cancelled on unload so thats fine
+        task_ping = self.loop.create_task(self.ping_until_alive())
+        self.tasks.append(task_ping)
 
     async def async_cancel_tasks(self) -> None:
         """Cancel all tasks."""
@@ -520,15 +524,11 @@ class Madvr:
 
         standby: bool -> standby instead of poweroff if true
         """
-        try:
-            # stop trying to reconnect
-            self.stop()
-            if self.connected():
-                await self.send_command(["Standby"] if standby else ["PowerOff"])
-        except (ConnectionResetError, RetryExceededError):
-            pass
-        finally:
-            await self.stop_processing_commands()
-            await self.close_connection()
-            # set the flag to delay the ping task to avoid race conditions
-            self.powered_off_recently = True
+        self.stop()
+        # set the flag to delay the ping task to avoid race conditions
+        self.powered_off_recently = True
+        if self.connected():
+            await self.send_command(["Standby"] if standby else ["PowerOff"])
+
+        await self.stop_processing_commands()
+        await self.close_connection()
