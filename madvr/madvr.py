@@ -2,12 +2,14 @@
 Implements the MadVR protocol
 """
 
+import asyncio
 import logging
 import os  # For ping functionality
-from typing import Final, Iterable
-import asyncio
-from madvr.commands import Footer, Commands, Connections
-from madvr.errors import AckError, RetryExceededError, HeartBeatError
+from typing import Any, Final, Iterable
+
+from madvr.commands import Commands, Connections, Footer
+from madvr.errors import AckError, HeartBeatError, RetryExceededError
+from madvr.notifications import NotificationProcessor
 from madvr.wol import send_magic_packet
 
 
@@ -26,7 +28,7 @@ class Madvr:
         heartbeat_interval: int = 15,
         ping_interval: int = 5,
         # pass in the hass loop
-        loop: asyncio.AbstractEventLoop = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ):
         self.host = host
         self.port = port
@@ -40,7 +42,6 @@ class Madvr:
         self.connection_event = asyncio.Event()
         self.stop_reconnect = asyncio.Event()
         self.stop_heartbeat = asyncio.Event()
-        self.heartbeat_task = None
 
         # command queue to store commands as they come in
         self.command_queue: asyncio.Queue = asyncio.Queue()
@@ -57,7 +58,7 @@ class Madvr:
         self.HEARTBEAT: Final = Connections.heartbeat.value
 
         # stores all attributes
-        self.msg_dict = {}
+        self.msg_dict: dict = {}
 
         # Sockets
         self.reader = None
@@ -69,8 +70,7 @@ class Madvr:
         # self.async_write_ha_state from HA
         self.update_callback = None
 
-        # Start the ping task
-        self.ping_task = asyncio.create_task(self.ping_until_alive())
+        self.notification_processor = NotificationProcessor(self.logger)
         self.powered_off_recently = False
         self.ping_delay_after_power_off: int = 30
         self.logger.debug("Running in debug mode")
@@ -80,11 +80,11 @@ class Madvr:
         """Return true if the device is on."""
         return self.msg_dict.get("is_on", False)
 
-    def set_update_callback(self, callback):
+    def set_update_callback(self, callback: Any) -> None:
         """Function to set the callback for updating HA state"""
         self.update_callback = callback
 
-    async def async_add_tasks(self):
+    async def async_add_tasks(self) -> None:
         """Add background tasks."""
         # loop can be passed from HA
         if not self.loop:
@@ -99,7 +99,7 @@ class Madvr:
         task_hb = self.loop.create_task(self.send_heartbeat())
         self.tasks.append(task_hb)
 
-    async def async_cancel_tasks(self):
+    async def async_cancel_tasks(self) -> None:
         """Cancel all tasks."""
         for task in self.tasks:
             if not task.done():
@@ -134,9 +134,6 @@ class Madvr:
         try:
             await self._reconnect()
             self.logger.debug("Connection opened")
-            if self.heartbeat_task is None or self.heartbeat_task.done():
-                self.logger.debug("Starting heartbeat task")
-                self.heartbeat_task = asyncio.create_task(self.send_heartbeat())
         except AckError as err:
             self.logger.error(err)
 
@@ -148,7 +145,7 @@ class Madvr:
             and not self.reader.at_eof()
         )
 
-    async def handle_queue(self):
+    async def handle_queue(self) -> None:
         """Handle command queue."""
         while True:
             await self.connection_event.wait()
@@ -187,20 +184,17 @@ class Madvr:
         """Add a command to the queue"""
         await self.command_queue.put(command)
 
-    def clear_queue(self):
+    def clear_queue(self) -> None:
         """Clear queue."""
         self.command_queue = asyncio.Queue()
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop reconnecting"""
         self.stop_reconnect.set()
         self.stop_heartbeat.set()
         self.clear_queue()
 
-        if self.heartbeat_task:
-            self.heartbeat_task.cancel()
-
-    async def ping_until_alive(self):
+    async def ping_until_alive(self) -> None:
         """Ping the device until it is online then connect to it"""
         while True:
             if self.powered_off_recently:
@@ -242,7 +236,7 @@ class Madvr:
 
                 # Command client
                 self.reader, self.writer = await asyncio.wait_for(
-                    asyncio.open_connection(self.host, self.port),
+                    asyncio.open_connection(self.host, self.port),  # type: ignore[arg-type]
                     timeout=5,
                 )
                 self.logger.debug("Handshaking")
@@ -277,7 +271,14 @@ class Madvr:
         response = os.system(f"ping -c 1 -W 2 {self.host}")
         return response == 0
 
-    async def send_heartbeat(self, once=False) -> None:
+    async def refresh_data(self) -> None:
+        """sends basic commands to device to get current state otherwise state will not update until you change it"""
+        await self.send_command(["GetIncomingSignalInfo"])
+        await self.send_command(["GetOutgoingSignalInfo"])
+        await self.send_command(["GetAspectRatio"])
+        await self.send_command(["GetMaskingRatio"])
+
+    async def send_heartbeat(self, once: bool = False) -> None:
         """
         Send a heartbeat to keep connection open
 
@@ -291,8 +292,9 @@ class Madvr:
                     self.logger.warning("Connection not established, retrying")
                     await self._reconnect()
                 async with self.lock:
-                    self.writer.write(self.HEARTBEAT)
-                    await self.writer.drain()
+                    if self.writer:
+                        self.writer.write(self.HEARTBEAT)
+                        await self.writer.drain()
                 self.logger.debug("heartbeat complete")
             except asyncio.TimeoutError:
                 self.logger.error("timeout when sending heartbeat")
@@ -308,16 +310,18 @@ class Madvr:
                     self.logger.warning("Connection not established, retrying")
                     await self._reconnect()
                 async with self.lock:
-                    self.writer.write(self.HEARTBEAT)
-                    await self.writer.drain()
+                    if self.writer:
+                        self.writer.write(self.HEARTBEAT)
+                        await self.writer.drain()
                 self.logger.debug("heartbeat complete")
             except asyncio.TimeoutError as err:
                 self.logger.error("timeout when sending heartbeat %s", err)
             except OSError as err:
                 self.logger.error("error when sending heartbeat %s", err)
                 await self._clear_attr()
-                if self.ping_task is None or self.ping_task.done():
-                    self.ping_task = asyncio.create_task(self.ping_until_alive())
+                # this means something went wrong with the connection
+                await self.close_connection()
+                await self._reconnect()
             finally:
                 await asyncio.sleep(self.heartbeat_interval)
 
@@ -371,6 +375,7 @@ class Madvr:
         command_name, val, _ = Commands[command].value
 
         # if there is a value to process
+        cmd: bytes = b""
         if not skip_val:
             try:
                 # add the base command
@@ -386,14 +391,14 @@ class Madvr:
                         command_base += b" " + val[value.lstrip(" ")].value
 
                 # Construct command based on required values
-                cmd: bytes = command_base + Footer.footer.value
+                cmd = command_base + Footer.footer.value
 
             except KeyError as exc:
                 raise NotImplementedError(
                     "Incorrect parameter given for command"
                 ) from exc
         else:
-            cmd: bytes = command_name + Footer.footer.value
+            cmd = command_name + Footer.footer.value
 
         self.logger.debug("constructed command: %s", cmd)
 
@@ -428,8 +433,9 @@ class Madvr:
                     retry_count += 1
                     continue
                 async with self.lock:
-                    self.writer.write(cmd)
-                    await self.writer.drain()
+                    if self.writer:
+                        self.writer.write(cmd)
+                        await self.writer.drain()
                 return "ok"  # if success, break the loop
             except ConnectionResetError as err:
                 # for now just assuming the envy was turned off
@@ -456,10 +462,12 @@ class Madvr:
             # wait until the connection is established
             await self.connection_event.wait()
             try:
-                msg = await asyncio.wait_for(
-                    self.reader.read(self.read_limit), timeout=self.command_read_timeout
-                )
-                await self._process_notifications(msg.decode("utf-8"))
+                if self.reader:
+                    msg = await asyncio.wait_for(
+                        self.reader.read(self.read_limit),
+                        timeout=self.command_read_timeout,
+                    )
+                    await self._process_notifications(msg.decode("utf-8"))
             except TimeoutError:
                 self.logger.debug("No notifications to read")
             except (
@@ -476,70 +484,28 @@ class Madvr:
             continue
 
     async def _process_notifications(self, msg: str) -> None:
-        """Parse a message and store the attributes and values in a dictionary"""
-        self.logger.debug("Processing notifications: %s", msg)
-        notifications = msg.split("\r\n")
-        # for each /r/n split it by title, then the rest are values
-        for notification in notifications:
-            title, *signal_info = notification.split(" ")
-            self.logger.debug("Processing notification Title: %s", title)
-            # detect if it was turned off out of band, the device sends this notification
-            if "PowerOff" in title:
-                await self._clear_attr()
-                self.powered_off_recently = True
-                self.stop()
-                await self.close_connection()
+        """process data in real time"""
+        processed_data = await self.notification_processor.process_notifications(msg)
 
-            if "NoSignal" in title:
-                self.msg_dict["is_signal"] = False
+        if processed_data.get("power_off"):
+            await self._handle_power_off()
 
-            # dont process empty values
-            if not signal_info:
-                continue
-            # at least madvr sends attributes in a consistent order
-            # could use zip here but why? this works and is simple
+        self.msg_dict.update(processed_data)
+        await self._update_ha_state()
 
-            if "IncomingSignalInfo" in title:
-                self.msg_dict["is_signal"] = True
-                self.msg_dict["incoming_res"] = signal_info[0]
-                self.msg_dict["incoming_frame_rate"] = signal_info[1]
-                self.msg_dict["incoming_color_space"] = signal_info[3]
-                self.msg_dict["incoming_bit_depth"] = signal_info[4]
-                self.msg_dict["hdr_flag"] = "HDR" in signal_info[5]
-                self.msg_dict["incoming_colorimetry"] = signal_info[6]
-                self.msg_dict["incoming_black_levels"] = signal_info[7]
-                self.msg_dict["incoming_aspect_ratio"] = signal_info[8]
-            elif "OutgoingSignalInfo" in title:
-                self.msg_dict["outgoing_res"] = signal_info[0]
-                self.msg_dict["outgoing_frame_rate"] = signal_info[1]
-                self.msg_dict["outgoing_color_space"] = signal_info[3]
-                self.msg_dict["outgoing_bit_depth"] = signal_info[4]
-                self.msg_dict["outgoing_hdr_flag"] = "HDR" in signal_info[5]
-                self.msg_dict["outgoing_colorimetry"] = signal_info[6]
-                self.msg_dict["outgoing_black_levels"] = signal_info[7]
-            elif "AspectRatio" in title:
-                self.msg_dict["aspect_res"] = signal_info[0]
-                self.msg_dict["aspect_dec"] = float(signal_info[1])
-                self.msg_dict["aspect_int"] = signal_info[2]
-                self.msg_dict["aspect_name"] = signal_info[3]
-            elif "MaskingRatio" in title:
-                self.msg_dict["masking_res"] = signal_info[0]
-                self.msg_dict["masking_dec"] = float(signal_info[1])
-                self.msg_dict["masking_int"] = signal_info[2]
-            elif "ActivateProfile" in title:
-                self.msg_dict["profile_name"] = signal_info[0]
-                self.msg_dict["profile_num"] = signal_info[1]
-            elif "ActiveProfile" in title:
-                self.msg_dict["profile_name"] = signal_info[0]
-                self.msg_dict["profile_num"] = signal_info[1]
+    async def _handle_power_off(self) -> None:
+        """Process out of band power off notifications"""
+        self.powered_off_recently = True
+        await self._clear_attr()
+        self.stop()
+        await self.close_connection()
 
-            # push HA state
-            if self.update_callback is not None:
-                try:
-                    # pass data to HA
-                    self.update_callback(self.msg_dict)
-                except Exception as err:  # pylint: disable=broad-except
-                    self.logger.error("Error updating HA: %s", err)
+    async def _update_ha_state(self) -> None:
+        if self.update_callback is not None:
+            try:
+                self.update_callback(self.msg_dict)
+            except Exception as err:
+                self.logger.error("Error updating HA: %s", err)
 
     async def power_on(self) -> None:
         """
@@ -548,7 +514,7 @@ class Madvr:
         send_magic_packet(self.mac, logger=self.logger)
         self.stop_commands_flag.clear()
 
-    async def power_off(self, standby=False) -> str:
+    async def power_off(self, standby: bool = False) -> None:
         """
         turn off madvr
 
@@ -558,12 +524,9 @@ class Madvr:
             # stop trying to reconnect
             self.stop()
             if self.connected():
-                res = await self.send_command(["Standby"] if standby else ["PowerOff"])
-                return res
-        except ConnectionResetError:
+                await self.send_command(["Standby"] if standby else ["PowerOff"])
+        except (ConnectionResetError, RetryExceededError):
             pass
-        except RetryExceededError:
-            return "Retries Exceeded"
         finally:
             await self.stop_processing_commands()
             await self.close_connection()
