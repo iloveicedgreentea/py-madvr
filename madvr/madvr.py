@@ -78,7 +78,7 @@ class Madvr:
     @property
     def is_on(self) -> bool:
         """Return true if the device is on."""
-        return self.msg_dict["is_on"]
+        return self.msg_dict.get("is_on", False)
 
     def set_update_callback(self, callback):
         """Function to set the callback for updating HA state"""
