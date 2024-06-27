@@ -284,13 +284,6 @@ class Madvr:
         response = os.system(f"ping -c 1 -W 2 {self.host}")
         return response == 0
 
-    async def refresh_data(self) -> None:
-        """sends basic commands to device to get current state otherwise state will not update until you change it"""
-        await self.send_command(["GetIncomingSignalInfo"])
-        await self.send_command(["GetOutgoingSignalInfo"])
-        await self.send_command(["GetAspectRatio"])
-        await self.send_command(["GetMaskingRatio"])
-
     async def send_heartbeat(self, once: bool = False) -> None:
         """
         Send a heartbeat to keep connection open
@@ -503,8 +496,10 @@ class Madvr:
         if processed_data.get("power_off"):
             await self._handle_power_off()
 
-        self.msg_dict.update(processed_data)
-        await self._update_ha_state()
+        # only update HA if the data has changed
+        if processed_data != self.msg_dict:
+            self.msg_dict.update(processed_data)
+            await self._update_ha_state()
 
     async def _handle_power_off(self) -> None:
         """Process out of band power off notifications"""
