@@ -3,11 +3,11 @@ Implements the MadVR protocol
 """
 
 import logging
-from typing import Final
-import asyncio
-from madvr.commands import ACKs, Footer, Commands, Enum, Connections
-from madvr.errors import AckError, RetryExceededError, HeartBeatError
 import os  # For ping functionality
+from typing import Final, Iterable
+import asyncio
+from madvr.commands import Footer, Commands, Connections
+from madvr.errors import AckError, RetryExceededError, HeartBeatError
 from madvr.wol import send_magic_packet
 
 
@@ -25,6 +25,8 @@ class Madvr:
         connect_timeout: int = 5,
         heartbeat_interval: int = 15,
         ping_interval: int = 5,
+        # pass in the hass loop
+        loop: asyncio.AbstractEventLoop = None,
     ):
         self.host = host
         self.port = port
@@ -40,10 +42,15 @@ class Madvr:
         self.stop_heartbeat = asyncio.Event()
         self.heartbeat_task = None
 
-        self.lock = asyncio.Lock()
+        # command queue to store commands as they come in
+        self.command_queue: asyncio.Queue = asyncio.Queue()
+        self.stop_commands_flag = asyncio.Event()
 
-        # track the device state
-        self.device_on = False
+        # background tasks
+        self.tasks: list[asyncio.Task] = []
+        self.loop = loop
+
+        self.lock = asyncio.Lock()
 
         # Const values
         self.MADVR_OK: Final = Connections.welcome.value
@@ -71,15 +78,36 @@ class Madvr:
     @property
     def is_on(self) -> bool:
         """Return true if the device is on."""
-        return self.device_on
+        return self.msg_dict["is_on"]
 
     def set_update_callback(self, callback):
         """Function to set the callback for updating HA state"""
         self.update_callback = callback
 
+    async def async_add_tasks(self):
+        """Add background tasks."""
+        # loop can be passed from HA
+        if not self.loop:
+            self.loop = asyncio.get_event_loop()
+
+        task_queue = self.loop.create_task(self.handle_queue())
+        self.tasks.append(task_queue)
+
+        task_notif = self.loop.create_task(self.read_notifications())
+        self.tasks.append(task_notif)
+
+        task_hb = self.loop.create_task(self.send_heartbeat())
+        self.tasks.append(task_hb)
+
+    async def async_cancel_tasks(self):
+        """Cancel all tasks."""
+        for task in self.tasks:
+            if not task.done():
+                task.cancel()
+
     async def _clear_attr(self) -> None:
         """
-        Clear instance attr so HA doesn't report stale values
+        Clear instance attr so HA doesn't report stale values and tells HA to write values to state
         """
         # Incoming attrs
         self.msg_dict = {"is_on": False}  # Clear attributes and set 'is_on' to False
@@ -98,8 +126,6 @@ class Madvr:
         self.writer = None
         self.reader = None
         self.connection_event.clear()
-        self.device_on = False  # update state
-        self.msg_dict["is_on"] = self.device_on
         await self._clear_attr()
 
     async def open_connection(self) -> None:
@@ -122,10 +148,54 @@ class Madvr:
             and not self.reader.at_eof()
         )
 
+    async def handle_queue(self):
+        """Handle command queue."""
+        while True:
+            await self.connection_event.wait()
+            while (
+                not self.command_queue.empty() and not self.stop_commands_flag.is_set()
+            ):
+                command = await self.command_queue.get()
+                self.logger.debug("sending queue command %s", command)
+                try:
+                    await self.send_command(command)
+                except ConnectionResetError:
+                    self.logger.warning("Envy was turned off manually")
+                    # update state that its off
+                    await self._clear_attr()
+                except AttributeError:
+                    self.logger.warning("Issue sending command from queue")
+                except RetryExceededError:
+                    self.logger.warning("Retry exceeded for command %s", command)
+                except OSError as err:
+                    self.logger.error("Unexpected error when sending command: %s", err)
+                finally:
+                    self.command_queue.task_done()
+
+            if self.stop_commands_flag.is_set():
+                self.clear_queue()
+                self.logger.debug("Stopped processing commands")
+                break
+
+            await asyncio.sleep(0.1)
+
+    async def stop_processing_commands(self) -> None:
+        """Clear state."""
+        self.stop_commands_flag.set()
+
+    async def add_command_to_queue(self, command: Iterable[str]) -> None:
+        """Add a command to the queue"""
+        await self.command_queue.put(command)
+
+    def clear_queue(self):
+        """Clear queue."""
+        self.command_queue = asyncio.Queue()
+
     def stop(self):
         """Stop reconnecting"""
         self.stop_reconnect.set()
         self.stop_heartbeat.set()
+        self.clear_queue()
 
         if self.heartbeat_task:
             self.heartbeat_task.cancel()
@@ -181,8 +251,8 @@ class Madvr:
                 await self.send_heartbeat(once=True)
                 self.logger.info("Connection established")
                 self.connection_event.set()
-                self.device_on = True  # update state
-                self.msg_dict["is_on"] = self.device_on
+                # device cannot be off if we are connected
+                self.msg_dict["is_on"] = True
 
             except HeartBeatError:
                 self.logger.warning(
@@ -245,8 +315,7 @@ class Madvr:
                 self.logger.error("timeout when sending heartbeat %s", err)
             except OSError as err:
                 self.logger.error("error when sending heartbeat %s", err)
-                self.device_on = False  # update state
-                self.msg_dict["is_on"] = self.device_on
+                await self._clear_attr()
                 if self.ping_task is None or self.ping_task.done():
                     self.ping_task = asyncio.create_task(self.ping_until_alive())
             finally:
@@ -414,9 +483,9 @@ class Madvr:
         for notification in notifications:
             title, *signal_info = notification.split(" ")
             self.logger.debug("Processing notification Title: %s", title)
-            # detect if it was turned off out of band
+            # detect if it was turned off out of band, the device sends this notification
             if "PowerOff" in title:
-                self.msg_dict["is_on"] = False
+                await self._clear_attr()
                 self.powered_off_recently = True
                 self.stop()
                 await self.close_connection()
@@ -469,7 +538,6 @@ class Madvr:
                 try:
                     # pass data to HA
                     self.update_callback(self.msg_dict)
-                # catch every possible error because python is a mess why can't you just guarantee runtime behavior?
                 except Exception as err:  # pylint: disable=broad-except
                     self.logger.error("Error updating HA: %s", err)
 
@@ -478,6 +546,7 @@ class Madvr:
         Power on the device with a magic packet
         """
         send_magic_packet(self.mac, logger=self.logger)
+        self.stop_commands_flag.clear()
 
     async def power_off(self, standby=False) -> str:
         """
@@ -496,32 +565,7 @@ class Madvr:
         except RetryExceededError:
             return "Retries Exceeded"
         finally:
+            await self.stop_processing_commands()
             await self.close_connection()
             # set the flag to delay the ping task to avoid race conditions
             self.powered_off_recently = True
-
-    def print_commands(self) -> str:
-        """
-        Print out all supported commands
-        """
-        print_commands = sorted(
-            [
-                command.name
-                for command in Commands
-                if command.name not in ["power_status", "current_output", "info"]
-            ]
-        )
-        print("Currently Supported Commands:")
-        for command in print_commands:
-            print(f"\t{command}")
-
-        print("\n")
-        print("Currently Supported Parameters:")
-        from madvr import commands
-        import inspect
-
-        for name, obj in inspect.getmembers(commands):
-            if inspect.isclass(obj) and obj not in [Commands, ACKs, Footer, Enum]:
-                print(name)
-                for option in obj:
-                    print(f"\t{option.name}")
