@@ -3,5 +3,9 @@ black
 pylint
 build
 twine
-pytest 
+pytest
 pytest-asyncio
+pre-commit
+mypy
+ruff
+pydantic

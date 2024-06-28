@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# ruff: noqa
 """Small module for use with the wake on lan protocol.
 
 taken from https://github.com/remcohaszing/pywakeonlan/blob/main/wakeonlan/__init__.py
