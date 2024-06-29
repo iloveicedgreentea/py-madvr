@@ -165,6 +165,7 @@ class Madvr:
         """Handle command queue."""
         while True:
             await self.connection_event.wait()
+            self.logger.info("Processing commands")
             while (
                 not self.command_queue.empty() and not self.stop_commands_flag.is_set()
             ):
@@ -194,14 +195,17 @@ class Madvr:
 
     async def add_command_to_queue(self, command: Iterable[str]) -> None:
         """Add a command to the queue"""
+        self.logger.info("Adding command to queue: %s", command)
         await self.command_queue.put(command)
 
     def clear_queue(self) -> None:
         """Clear queue."""
+        self.logger.info("Clearing command queue")
         self.command_queue = asyncio.Queue()
 
     def stop(self) -> None:
         """Stop reconnecting"""
+        self.logger.info("Setting stop flags")
         self.stop_heartbeat.set()
         self.stop_commands_flag.set()
 
@@ -243,7 +247,7 @@ class Madvr:
         """
         # it will not try to connect until ping is successful
         if await self.ping_device():
-            self.logger.debug("Device is online")
+            self.logger.info("Device is online")
 
             try:
                 self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
@@ -264,7 +268,7 @@ class Madvr:
 
                 self.logger.info("Connection established")
                 self.connection_event.set()
-
+                self.logger.info("Connection event is %s", self.connection_event.is_set())
                 # device cannot be off if we are connected
                 self.msg_dict["is_on"] = True
                 await self._update_ha_state()
@@ -280,7 +284,7 @@ class Madvr:
             except OSError as err:
                 self.logger.error("Connecting failed %s", err)
         else:
-            self.logger.debug(
+            self.logger.warning(
                 "Device not responding to ping, retrying in %s seconds",
                 self.ping_interval,
             )
@@ -320,6 +324,7 @@ class Madvr:
 
         while not self.stop_heartbeat.is_set():
             await self.connection_event.wait()
+            self.logger.info("Processing heartbeats")
             try:
                 if not self.connected():
                     self.logger.warning("Connection not established, retrying")
@@ -476,6 +481,7 @@ class Madvr:
         while True:
             # wait until the connection is established
             await self.connection_event.wait()
+            self.logger.info("Processing notifications")
             try:
                 if self.reader:
                     msg = await asyncio.wait_for(
@@ -484,7 +490,7 @@ class Madvr:
                     )
                     await self._process_notifications(msg.decode("utf-8"))
             except TimeoutError:
-                self.logger.debug("No notifications to read")
+                self.logger.info("No notifications to read")
             except (
                 ConnectionResetError,
                 AttributeError,
@@ -520,6 +526,7 @@ class Madvr:
     async def _update_ha_state(self) -> None:
         if self.update_callback is not None:
             try:
+                self.logger.info("Updating HA with %s", self.msg_dict)
                 self.update_callback(self.msg_dict)
             except Exception as err:  # pylint: disable=broad-except
                 self.logger.error("Error updating HA: %s", err)
