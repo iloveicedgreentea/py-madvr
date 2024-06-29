@@ -163,7 +163,6 @@ class Madvr:
         """Handle command queue."""
         while True:
             await self.connection_event.wait()
-            self.logger.info("Processing commands")
             while (
                 not self.command_queue.empty() and not self.stop_commands_flag.is_set()
             ):
@@ -322,7 +321,6 @@ class Madvr:
 
         while not self.stop_heartbeat.is_set():
             await self.connection_event.wait()
-            self.logger.info("Processing heartbeats")
             try:
                 if not self.connected():
                     self.logger.warning("Connection not established, retrying")
@@ -479,7 +477,6 @@ class Madvr:
         while True:
             # wait until the connection is established
             await self.connection_event.wait()
-            self.logger.info("Processing notifications")
             try:
                 if self.reader:
                     msg = await asyncio.wait_for(
