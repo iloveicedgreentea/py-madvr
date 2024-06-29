@@ -100,10 +100,8 @@ class Madvr:
         self.tasks.append(task_hb)
 
         # this will only be cancelled on unload so thats fine
-        if self.mac:
-            # only start the ping task if a mac is provided because it doesnt matter if its on standby
-            task_ping = self.loop.create_task(self.ping_until_alive())
-            self.tasks.append(task_ping)
+        task_ping = self.loop.create_task(self.ping_until_alive())
+        self.tasks.append(task_ping)
 
     async def async_cancel_tasks(self) -> None:
         """Cancel all tasks."""
@@ -268,7 +266,9 @@ class Madvr:
 
                 self.logger.info("Connection established")
                 self.connection_event.set()
-                self.logger.info("Connection event is %s", self.connection_event.is_set())
+                self.logger.info(
+                    "Connection event is %s", self.connection_event.is_set()
+                )
                 # device cannot be off if we are connected
                 self.msg_dict["is_on"] = True
                 await self._update_ha_state()
@@ -284,11 +284,9 @@ class Madvr:
             except OSError as err:
                 self.logger.error("Connecting failed %s", err)
         else:
-            self.logger.warning(
-                "Device not responding to ping, retrying in %s seconds",
-                self.ping_interval,
+            self.logger.error(
+                "Device not responding to ping. Ensure it is on or standby"
             )
-            await asyncio.sleep(self.ping_interval)
 
     async def ping_device(self) -> bool:
         """
@@ -543,11 +541,8 @@ class Madvr:
             self.logger.debug("Sending magic packet to %s", self.mac)
             send_magic_packet(self.mac, logger=self.logger)
         else:
-            self.logger.debug("No mac provided, assuming device is on standby")
-            # if no mac was provided, assume its on standby and connect
-            await self._reconnect()
-            # any remote command will trigger power on
-            await self.add_command_to_queue(["CloseMenu"])
+            # without wol, you cant power on the device
+            self.logger.warning("No mac provided, no action to take. Implement your own WOL automation")
 
     async def power_off(self, standby: bool = False) -> None:
         """
@@ -559,9 +554,6 @@ class Madvr:
         # set the flag to delay the ping task to avoid race conditions
         self.powered_off_recently = True
         if self.connected():
-            if self.mac:
-                await self.send_command(["Standby"] if standby else ["PowerOff"])
-            else:
-                await self.send_command(["Standby"])
+            await self.send_command(["Standby"] if standby else ["PowerOff"])
 
         await self.close_connection()
