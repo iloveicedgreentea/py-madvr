@@ -23,6 +23,7 @@ class Madvr:
         # Can supply a logger object. It can hook into the HA logger
         logger: logging.Logger = logging.getLogger(__name__),
         port: int = 44077,
+        # if blank, power off will use standby mode and poweron will require device to be in standby
         mac: str = "",
         connect_timeout: int = 5,
         heartbeat_interval: int = 15,
@@ -40,7 +41,6 @@ class Madvr:
 
         # used to indicate if connection is ready
         self.connection_event = asyncio.Event()
-        self.stop_reconnect = asyncio.Event()
         self.stop_heartbeat = asyncio.Event()
 
         # command queue to store commands as they come in
@@ -100,8 +100,10 @@ class Madvr:
         self.tasks.append(task_hb)
 
         # this will only be cancelled on unload so thats fine
-        task_ping = self.loop.create_task(self.ping_until_alive())
-        self.tasks.append(task_ping)
+        if self.mac:
+            # only start the ping task if a mac is provided because it doesnt matter if its on standby
+            task_ping = self.loop.create_task(self.ping_until_alive())
+            self.tasks.append(task_ping)
 
     async def async_cancel_tasks(self) -> None:
         """Cancel all tasks."""
@@ -140,6 +142,7 @@ class Madvr:
             self.logger.debug("Connection opened")
         except AckError as err:
             self.logger.error(err)
+
         # once connected, try to refresh data once in the case the device was turned connected to while on already
         cmds = [
             ["GetIncomingSignalInfo"],
@@ -189,10 +192,6 @@ class Madvr:
 
             await asyncio.sleep(0.1)
 
-    async def stop_processing_commands(self) -> None:
-        """Clear state."""
-        self.stop_commands_flag.set()
-
     async def add_command_to_queue(self, command: Iterable[str]) -> None:
         """Add a command to the queue"""
         await self.command_queue.put(command)
@@ -203,9 +202,8 @@ class Madvr:
 
     def stop(self) -> None:
         """Stop reconnecting"""
-        self.stop_reconnect.set()
         self.stop_heartbeat.set()
-        self.clear_queue()
+        self.stop_commands_flag.set()
 
     async def ping_until_alive(self) -> None:
         """Ping the device until it is online then connect to it"""
@@ -236,14 +234,17 @@ class Madvr:
                     await self.close_connection()
             await asyncio.sleep(self.ping_interval)
 
+    # TODO: this should return a bool
     async def _reconnect(self) -> None:
         """
         Initiate keep-alive connection. This should handle any error and reconnect eventually.
 
         Raises AckError
         """
+        # it will not try to connect until ping is successful
         if await self.ping_device():
             self.logger.debug("Device is online")
+
             try:
                 self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
 
@@ -254,22 +255,30 @@ class Madvr:
                 )
                 self.logger.debug("Handshaking")
                 self.logger.info("Waiting for envy to be available")
+
                 await asyncio.sleep(3)
+                # unblock heartbeat task
+                self.stop_heartbeat.clear()
+                # TODO: verify heartbeat by reading for heartbeat ok
                 await self.send_heartbeat(once=True)
+
                 self.logger.info("Connection established")
                 self.connection_event.set()
+
                 # device cannot be off if we are connected
                 self.msg_dict["is_on"] = True
+                await self._update_ha_state()
 
             except HeartBeatError:
                 self.logger.warning(
                     "Error sending heartbeat, retrying in %s seconds", 2
                 )
+                # TODO: this should fail not retry, this doesnt retry anymore anyway
                 await asyncio.sleep(2)
             except TimeoutError:
-                self.logger.debug("Connecting timed out")
+                self.logger.error("Connecting timed out")
             except OSError as err:
-                self.logger.debug("Connecting failed %s", err)
+                self.logger.error("Connecting failed %s", err)
         else:
             self.logger.debug(
                 "Device not responding to ping, retrying in %s seconds",
@@ -512,19 +521,30 @@ class Madvr:
         if self.update_callback is not None:
             try:
                 self.update_callback(self.msg_dict)
-            except Exception as err:
+            except Exception as err:  # pylint: disable=broad-except
                 self.logger.error("Error updating HA: %s", err)
 
     async def power_on(self) -> None:
         """
-        Power on the device with a magic packet
+        Power on the device
         """
-        send_magic_packet(self.mac, logger=self.logger)
+        # start processing commands
         self.stop_commands_flag.clear()
+
+        if self.mac:
+            # this will allow ping to trigger the connection
+            self.logger.debug("Sending magic packet to %s", self.mac)
+            send_magic_packet(self.mac, logger=self.logger)
+        else:
+            self.logger.debug("No mac provided, assuming device is on standby")
+            # if no mac was provided, assume its on standby and connect
+            await self._reconnect()
+            # any remote command will trigger power on
+            await self.add_command_to_queue(["CloseMenu"])
 
     async def power_off(self, standby: bool = False) -> None:
         """
-        turn off madvr
+        turn off madvr or set to standby
 
         standby: bool -> standby instead of poweroff if true
         """
@@ -532,7 +552,9 @@ class Madvr:
         # set the flag to delay the ping task to avoid race conditions
         self.powered_off_recently = True
         if self.connected():
-            await self.send_command(["Standby"] if standby else ["PowerOff"])
+            if self.mac:
+                await self.send_command(["Standby"] if standby else ["PowerOff"])
+            else:
+                await self.send_command(["Standby"])
 
-        await self.stop_processing_commands()
         await self.close_connection()
