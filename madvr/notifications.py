@@ -59,12 +59,9 @@ class NotificationProcessor:
                 self.logger.error(f"Error processing {title}: {e}")
                 self.logger.debug(f"Signal info: {signal_info}")
 
-    # TODO: make mac address in HA sensor
     def _process_mac_address(self, info: list[str]) -> None:
         self.msg_dict["mac_address"] = info[0]
 
-    # TODO: make temp sensors in HA (celcius)
-    # TODO: if temp is high, use DisplayAlertWindow
     def _process_temperatures(self, info: list[str]) -> None:
         self.msg_dict.update(
             {
