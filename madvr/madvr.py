@@ -559,14 +559,14 @@ class Madvr:
             except Exception as err:  # pylint: disable=broad-except
                 self.logger.error("Error updating HA: %s", err)
 
-    async def power_on(self) -> None:
+    async def power_on(self, mac: str = "") -> None:
         """
         Power on the device
         """
         # start processing commands
         self.stop_commands_flag.clear()
 
-        mac_to_use = self.mac_address or self.mac
+        mac_to_use = self.mac_address or self.mac or mac
         if mac_to_use:
             # this will allow ping to trigger the connection
             self.logger.debug("Sending magic packet to %s", mac_to_use)
