@@ -29,9 +29,11 @@ class NotificationProcessor:
             self.logger.debug("Processing notification Title: %s", title)
 
             if title == "PowerOff":
-                self.msg_dict["power_off"] = True
+                self.msg_dict["is_on"] = False
             elif title == "NoSignal":
                 self.msg_dict["is_signal"] = False
+            elif title == "Standby":
+                self.msg_dict["is_on"] = False
             else:
                 self._process_signal_info(title, signal_info.split())
 
@@ -45,6 +47,8 @@ class NotificationProcessor:
             "MaskingRatio": self._process_masking_ratio,
             "ActivateProfile": self._process_profile,
             "ActiveProfile": self._process_profile,
+            "MacAddress": self._process_mac_address,
+            "Temperatures": self._process_temperatures,
         }
         processor = processors.get(title)
         if processor:
@@ -54,6 +58,22 @@ class NotificationProcessor:
             except (KeyError, IndexError) as e:
                 self.logger.error(f"Error processing {title}: {e}")
                 self.logger.debug(f"Signal info: {signal_info}")
+
+    # TODO: make mac address in HA sensor
+    def _process_mac_address(self, info: list[str]) -> None:
+        self.msg_dict["mac_address"] = info[0]
+
+    # TODO: make temp sensors in HA (celcius)
+    # TODO: if temp is high, use DisplayAlertWindow
+    def _process_temperatures(self, info: list[str]) -> None:
+        self.msg_dict.update(
+            {
+                "temp_gpu": info[0],
+                "temp_hdmi": info[1],
+                "temp_cpu": info[2],
+                "temp_mainboard": info[3],
+            }
+        )
 
     def _process_incoming_signal(self, info: list[str]) -> None:
         self.msg_dict.update(

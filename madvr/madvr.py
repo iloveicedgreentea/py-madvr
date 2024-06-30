@@ -23,6 +23,7 @@ class Madvr:
         # Can supply a logger object. It can hook into the HA logger
         logger: logging.Logger = logging.getLogger(__name__),
         port: int = 44077,
+        # if blank, it will request it from the device for WOL
         mac: str = "",
         connect_timeout: int = 5,
         heartbeat_interval: int = 15,
@@ -40,7 +41,6 @@ class Madvr:
 
         # used to indicate if connection is ready
         self.connection_event = asyncio.Event()
-        self.stop_reconnect = asyncio.Event()
         self.stop_heartbeat = asyncio.Event()
 
         # command queue to store commands as they come in
@@ -75,10 +75,18 @@ class Madvr:
         self.ping_delay_after_power_off: int = 30
         self.logger.debug("Running in debug mode")
 
+    ##########################
+    # Props
+    ##########################
     @property
     def is_on(self) -> bool:
         """Return true if the device is on."""
         return self.msg_dict.get("is_on", False)
+
+    @property
+    def mac_address(self) -> str:
+        """Return the mac address of the device."""
+        return self.msg_dict.get("mac_address", "")
 
     def set_update_callback(self, callback: Any) -> None:
         """Function to set the callback for updating HA state"""
@@ -90,18 +98,21 @@ class Madvr:
         if not self.loop:
             self.loop = asyncio.get_event_loop()
 
-        task_queue = self.loop.create_task(self.handle_queue())
+        task_queue = self.loop.create_task(self.task_handle_queue())
         self.tasks.append(task_queue)
 
-        task_notif = self.loop.create_task(self.read_notifications())
+        task_notif = self.loop.create_task(self.task_read_notifications())
         self.tasks.append(task_notif)
 
         task_hb = self.loop.create_task(self.send_heartbeat())
         self.tasks.append(task_hb)
 
         # this will only be cancelled on unload so thats fine
-        task_ping = self.loop.create_task(self.ping_until_alive())
+        task_ping = self.loop.create_task(self.task_ping_until_alive())
         self.tasks.append(task_ping)
+
+        task_refresh = self.loop.create_task(self.task_refresh_info())
+        self.tasks.append(task_refresh)
 
     async def async_cancel_tasks(self) -> None:
         """Cancel all tasks."""
@@ -109,6 +120,164 @@ class Madvr:
             if not task.done():
                 task.cancel()
 
+    ##########################
+    # Background tasks
+    ##########################
+    async def task_handle_queue(self) -> None:
+        """Handle command queue."""
+        while True:
+            await self.connection_event.wait()
+            while (
+                not self.command_queue.empty() and not self.stop_commands_flag.is_set()
+            ):
+                command = await self.command_queue.get()
+                self.logger.debug("sending queue command %s", command)
+                try:
+                    await self.send_command(command)
+                except ConnectionResetError:
+                    self.logger.warning("Envy was turned off manually")
+                    # update state that its off
+                    await self._clear_attr()
+                except AttributeError:
+                    self.logger.warning("Issue sending command from queue")
+                except RetryExceededError:
+                    self.logger.warning("Retry exceeded for command %s", command)
+                except OSError as err:
+                    self.logger.error("Unexpected error when sending command: %s", err)
+                finally:
+                    self.command_queue.task_done()
+
+            if self.stop_commands_flag.is_set():
+                self.clear_queue()
+                self.logger.debug("Stopped processing commands")
+                break
+
+            await asyncio.sleep(0.1)
+
+    async def task_read_notifications(self) -> None:
+        """
+        Read notifications from the server and update attributes
+        """
+        while True:
+            # wait until the connection is established
+            await self.connection_event.wait()
+            try:
+                if self.reader:
+                    msg = await asyncio.wait_for(
+                        self.reader.read(self.read_limit),
+                        timeout=self.command_read_timeout,
+                    )
+                    await self._process_notifications(msg.decode("utf-8"))
+            except TimeoutError:
+                self.logger.info("No notifications to read")
+            except (
+                ConnectionResetError,
+                AttributeError,
+                BrokenPipeError,
+                OSError,
+            ) as err:
+                self.logger.error("Reading notifications failed or timed out: %s", err)
+                await self._reconnect()
+                continue
+
+            await asyncio.sleep(0.1)
+            continue
+
+    async def send_heartbeat(self, once: bool = False) -> None:
+        """
+        Send a heartbeat to keep connection open
+
+        You should wrap this in try with OSError and asyncio.TimeoutError exceptions
+
+        Raises HeartBeatError exception
+        """
+        # TODO: improve this as its own thing
+        if once:
+            try:
+                if not self.connected():
+                    self.logger.warning("Connection not established, retrying")
+                    await self._reconnect()
+                async with self.lock:
+                    if self.writer:
+                        self.writer.write(self.HEARTBEAT)
+                        await self.writer.drain()
+                # TODO: need to confirm the heartbeat was received
+                self.logger.debug("heartbeat complete")
+            except asyncio.TimeoutError:
+                self.logger.error("timeout when sending heartbeat")
+            except OSError:
+                self.logger.error("error when sending heartbeat")
+                await self._reconnect()
+            return
+
+        while not self.stop_heartbeat.is_set():
+            await self.connection_event.wait()
+            try:
+                if not self.connected():
+                    self.logger.warning("Connection not established, retrying")
+                    await self._reconnect()
+                async with self.lock:
+                    if self.writer:
+                        self.writer.write(self.HEARTBEAT)
+                        await self.writer.drain()
+                self.logger.debug("heartbeat complete")
+            except asyncio.TimeoutError as err:
+                self.logger.error("timeout when sending heartbeat %s", err)
+            except OSError as err:
+                self.logger.error("error when sending heartbeat %s", err)
+                await self._clear_attr()
+                # this means something went wrong with the connection
+                await self.close_connection()
+                await self._reconnect()
+            finally:
+                await asyncio.sleep(self.heartbeat_interval)
+
+    async def task_ping_until_alive(self) -> None:
+        """Ping the device until it is online then connect to it"""
+        while True:
+            if self.powered_off_recently:
+                self.logger.debug(
+                    "Device was recently powered off, waiting for %s seconds",
+                    self.ping_delay_after_power_off,
+                )
+                await asyncio.sleep(self.ping_delay_after_power_off)
+                self.powered_off_recently = False
+
+            # if its powered off out of band, this can cause a false positive
+            if await self.ping_device():
+                # wait a few seconds and confirm the ping
+                await asyncio.sleep(2)
+                if await self.ping_device():
+                    if not self.connected():
+                        self.logger.debug("Device is pingable, attempting to connect")
+                        await self.open_connection()
+            else:
+                self.logger.debug(
+                    "Device is offline, retrying in %s seconds", self.ping_interval
+                )
+                # if its marked as connected still, then close the connection
+                if self.connected():
+                    self.stop()
+                    await self.close_connection()
+            await asyncio.sleep(self.ping_interval)
+
+    async def task_refresh_info(self) -> None:
+        """Task to refresh some device info"""
+        while True:
+            # wait until the connection is established
+            await self.connection_event.wait()
+            cmds = [
+                ["GetMacAddress"],
+                ["GetTemperatures"],
+            ]
+            for cmd in cmds:
+                await self.add_command_to_queue(cmd)
+            await asyncio.sleep(60)
+
+    ##########################
+    # Connection
+    ##########################
+    # TODO organise stff
     async def _clear_attr(self) -> None:
         """
         Clear instance attr so HA doesn't report stale values and tells HA to write values to state
@@ -140,12 +309,14 @@ class Madvr:
             self.logger.debug("Connection opened")
         except AckError as err:
             self.logger.error(err)
+
         # once connected, try to refresh data once in the case the device was turned connected to while on already
         cmds = [
             ["GetIncomingSignalInfo"],
             ["GetOutgoingSignalInfo"],
             ["GetAspectRatio"],
             ["GetMaskingRatio"],
+            ["GetMacAddress"],
         ]
         for cmd in cmds:
             await self.add_command_to_queue(cmd)
@@ -158,92 +329,33 @@ class Madvr:
             and not self.reader.at_eof()
         )
 
-    async def handle_queue(self) -> None:
-        """Handle command queue."""
-        while True:
-            await self.connection_event.wait()
-            while (
-                not self.command_queue.empty() and not self.stop_commands_flag.is_set()
-            ):
-                command = await self.command_queue.get()
-                self.logger.debug("sending queue command %s", command)
-                try:
-                    await self.send_command(command)
-                except ConnectionResetError:
-                    self.logger.warning("Envy was turned off manually")
-                    # update state that its off
-                    await self._clear_attr()
-                except AttributeError:
-                    self.logger.warning("Issue sending command from queue")
-                except RetryExceededError:
-                    self.logger.warning("Retry exceeded for command %s", command)
-                except OSError as err:
-                    self.logger.error("Unexpected error when sending command: %s", err)
-                finally:
-                    self.command_queue.task_done()
-
-            if self.stop_commands_flag.is_set():
-                self.clear_queue()
-                self.logger.debug("Stopped processing commands")
-                break
-
-            await asyncio.sleep(0.1)
-
-    async def stop_processing_commands(self) -> None:
-        """Clear state."""
-        self.stop_commands_flag.set()
-
     async def add_command_to_queue(self, command: Iterable[str]) -> None:
         """Add a command to the queue"""
+        self.logger.info("Adding command to queue: %s", command)
         await self.command_queue.put(command)
 
     def clear_queue(self) -> None:
         """Clear queue."""
+        self.logger.info("Clearing command queue")
         self.command_queue = asyncio.Queue()
 
     def stop(self) -> None:
         """Stop reconnecting"""
-        self.stop_reconnect.set()
+        self.logger.info("Setting stop flags")
         self.stop_heartbeat.set()
-        self.clear_queue()
+        self.stop_commands_flag.set()
 
-    async def ping_until_alive(self) -> None:
-        """Ping the device until it is online then connect to it"""
-        while True:
-            if self.powered_off_recently:
-                self.logger.debug(
-                    "Device was recently powered off, waiting for %s seconds",
-                    self.ping_delay_after_power_off,
-                )
-                await asyncio.sleep(self.ping_delay_after_power_off)
-                self.powered_off_recently = False
-
-            # if its powered off out of band, this can cause a false positive
-            if await self.ping_device():
-                # wait a few seconds and confirm the ping
-                await asyncio.sleep(2)
-                if await self.ping_device():
-                    if not self.connected():
-                        self.logger.debug("Device is pingable, attempting to connect")
-                        await self.open_connection()
-            else:
-                self.logger.debug(
-                    "Device is offline, retrying in %s seconds", self.ping_interval
-                )
-                # if its marked as connected still, then close the connection
-                if self.connected():
-                    self.stop()
-                    await self.close_connection()
-            await asyncio.sleep(self.ping_interval)
-
+    # TODO: this should return a bool
     async def _reconnect(self) -> None:
         """
         Initiate keep-alive connection. This should handle any error and reconnect eventually.
 
         Raises AckError
         """
+        # it will not try to connect until ping is successful
         if await self.ping_device():
-            self.logger.debug("Device is online")
+            self.logger.info("Device is online")
+
             try:
                 self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
 
@@ -254,28 +366,36 @@ class Madvr:
                 )
                 self.logger.debug("Handshaking")
                 self.logger.info("Waiting for envy to be available")
+
                 await asyncio.sleep(3)
+                # unblock heartbeat task
+                self.stop_heartbeat.clear()
+                # TODO: verify heartbeat by reading for heartbeat ok
                 await self.send_heartbeat(once=True)
+
                 self.logger.info("Connection established")
                 self.connection_event.set()
+                self.logger.info(
+                    "Connection event is %s", self.connection_event.is_set()
+                )
                 # device cannot be off if we are connected
                 self.msg_dict["is_on"] = True
+                await self._update_ha_state()
 
             except HeartBeatError:
                 self.logger.warning(
                     "Error sending heartbeat, retrying in %s seconds", 2
                 )
+                # TODO: this should fail not retry, this doesnt retry anymore anyway
                 await asyncio.sleep(2)
             except TimeoutError:
-                self.logger.debug("Connecting timed out")
+                self.logger.error("Connecting timed out")
             except OSError as err:
-                self.logger.debug("Connecting failed %s", err)
+                self.logger.error("Connecting failed %s", err)
         else:
-            self.logger.debug(
-                "Device not responding to ping, retrying in %s seconds",
-                self.ping_interval,
+            self.logger.error(
+                "Device not responding to ping. Ensure it is on or standby"
             )
-            await asyncio.sleep(self.ping_interval)
 
     async def ping_device(self) -> bool:
         """
@@ -283,53 +403,6 @@ class Madvr:
         """
         response = os.system(f"ping -c 1 -W 2 {self.host}")
         return response == 0
-
-    async def send_heartbeat(self, once: bool = False) -> None:
-        """
-        Send a heartbeat to keep connection open
-
-        You should wrap this in try with OSError and asyncio.TimeoutError exceptions
-
-        Raises HeartBeatError exception
-        """
-        if once:
-            try:
-                if not self.connected():
-                    self.logger.warning("Connection not established, retrying")
-                    await self._reconnect()
-                async with self.lock:
-                    if self.writer:
-                        self.writer.write(self.HEARTBEAT)
-                        await self.writer.drain()
-                self.logger.debug("heartbeat complete")
-            except asyncio.TimeoutError:
-                self.logger.error("timeout when sending heartbeat")
-            except OSError:
-                self.logger.error("error when sending heartbeat")
-                await self._reconnect()
-            return
-
-        while not self.stop_heartbeat.is_set():
-            await self.connection_event.wait()
-            try:
-                if not self.connected():
-                    self.logger.warning("Connection not established, retrying")
-                    await self._reconnect()
-                async with self.lock:
-                    if self.writer:
-                        self.writer.write(self.HEARTBEAT)
-                        await self.writer.drain()
-                self.logger.debug("heartbeat complete")
-            except asyncio.TimeoutError as err:
-                self.logger.error("timeout when sending heartbeat %s", err)
-            except OSError as err:
-                self.logger.error("error when sending heartbeat %s", err)
-                await self._clear_attr()
-                # this means something went wrong with the connection
-                await self.close_connection()
-                await self._reconnect()
-            finally:
-                await asyncio.sleep(self.heartbeat_interval)
 
     async def _construct_command(self, raw_command: list[str]) -> tuple[bytes, str]:
         """
@@ -460,35 +533,6 @@ class Madvr:
 
         raise RetryExceededError("Retry exceeded")
 
-    async def read_notifications(self) -> None:
-        """
-        Read notifications from the server and update attributes
-        """
-        while True:
-            # wait until the connection is established
-            await self.connection_event.wait()
-            try:
-                if self.reader:
-                    msg = await asyncio.wait_for(
-                        self.reader.read(self.read_limit),
-                        timeout=self.command_read_timeout,
-                    )
-                    await self._process_notifications(msg.decode("utf-8"))
-            except TimeoutError:
-                self.logger.debug("No notifications to read")
-            except (
-                ConnectionResetError,
-                AttributeError,
-                BrokenPipeError,
-                OSError,
-            ) as err:
-                self.logger.error("Reading notifications failed or timed out: %s", err)
-                await self._reconnect()
-                continue
-
-            await asyncio.sleep(0.1)
-            continue
-
     async def _process_notifications(self, msg: str) -> None:
         """process data in real time"""
         processed_data = await self.notification_processor.process_notifications(msg)
@@ -511,20 +555,33 @@ class Madvr:
     async def _update_ha_state(self) -> None:
         if self.update_callback is not None:
             try:
+                self.logger.info("Updating HA with %s", self.msg_dict)
                 self.update_callback(self.msg_dict)
-            except Exception as err:
+            except Exception as err:  # pylint: disable=broad-except
                 self.logger.error("Error updating HA: %s", err)
 
-    async def power_on(self) -> None:
+    async def power_on(self, mac: str = "") -> None:
         """
-        Power on the device with a magic packet
+        Power on the device
         """
-        send_magic_packet(self.mac, logger=self.logger)
+        # start processing commands
         self.stop_commands_flag.clear()
+
+        # use the detected mac or one that is supplied at init or function call
+        mac_to_use = self.mac_address or self.mac or mac
+        if mac_to_use:
+            # this will allow ping to trigger the connection
+            self.logger.debug("Turning on with mac %s", mac_to_use)
+            send_magic_packet(mac_to_use, logger=self.logger)
+        else:
+            # without wol, you cant power on the device
+            self.logger.warning(
+                "No mac provided, no action to take. Implement your own WOL automation"
+            )
 
     async def power_off(self, standby: bool = False) -> None:
         """
-        turn off madvr
+        turn off madvr or set to standby
 
         standby: bool -> standby instead of poweroff if true
         """
@@ -534,5 +591,4 @@ class Madvr:
         if self.connected():
             await self.send_command(["Standby"] if standby else ["PowerOff"])
 
-        await self.stop_processing_commands()
         await self.close_connection()
