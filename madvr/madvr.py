@@ -571,7 +571,7 @@ class Madvr:
         mac_to_use = self.mac_address or self.mac or mac
         if mac_to_use:
             # this will allow ping to trigger the connection
-            self.logger.debug("Sending magic packet to %s", mac_to_use)
+            self.logger.debug("Turning on with mac %s", mac_to_use)
             send_magic_packet(mac_to_use, logger=self.logger)
         else:
             # without wol, you cant power on the device
