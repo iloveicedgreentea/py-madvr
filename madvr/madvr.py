@@ -316,6 +316,7 @@ class Madvr:
             ["GetOutgoingSignalInfo"],
             ["GetAspectRatio"],
             ["GetMaskingRatio"],
+            ["GetMacAddress"],
         ]
         for cmd in cmds:
             await self.add_command_to_queue(cmd)
@@ -566,6 +567,7 @@ class Madvr:
         # start processing commands
         self.stop_commands_flag.clear()
 
+        # use the detected mac or one that is supplied at init or function call
         mac_to_use = self.mac_address or self.mac or mac
         if mac_to_use:
             # this will allow ping to trigger the connection
