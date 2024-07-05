@@ -207,7 +207,9 @@ class Madvr:
                     await self.writer.drain()
                     self.logger.debug("Heartbeat complete")
 
-        async def handle_heartbeat_error(err: TimeoutError | OSError | HeartBeatError) -> None:
+        async def handle_heartbeat_error(
+            err: TimeoutError | OSError | HeartBeatError,
+        ) -> None:
             self.logger.error("Error when sending heartbeat: %s", err)
             raise HeartBeatError("Error when sending heartbeat") from err
 
@@ -248,7 +250,9 @@ class Madvr:
                         try:
                             await self.open_connection()
                         except ConnectionError as err:
-                            self.logger.error("Error opening connection after ping: %s", err)
+                            self.logger.error(
+                                "Error opening connection after ping: %s", err
+                            )
             else:
                 self.logger.debug(
                     "Device is offline, retrying in %s seconds", self.ping_interval
@@ -275,76 +279,12 @@ class Madvr:
     ##########################
     # Connection
     ##########################
-    # TODO organise stff
-    async def _clear_attr(self) -> None:
-        """
-        Clear instance attr so HA doesn't report stale values and tells HA to write values to state
-        """
-        # Incoming attrs
-        self.msg_dict = {"is_on": False}  # Clear attributes and set 'is_on' to False
-        if self.update_callback:
-            self.update_callback(self.msg_dict)
-
-    async def close_connection(self) -> None:
-        """close the connection"""
-        self.logger.debug("closing connection")
-        try:
-            if self.writer:
-                self.writer.close()
-                await self.writer.wait_closed()
-        except (ConnectionResetError, AttributeError):
-            pass
-        self.writer = None
-        self.reader = None
-        self.connection_event.clear()
-        await self._clear_attr()
-
-    async def open_connection(self) -> None:
-        """Open a connection"""
-        self.logger.debug("Starting open connection")
-        try:
-            await self._reconnect()
-            self.logger.debug("Connection opened")
-        except (AckError, ConnectionError) as err:
-            self.logger.error("Error opening connection: %s", err)
-            raise ConnectionError("Error opening connection") from err
-
-        # once connected, try to refresh data once in the case the device was turned connected to while on already
-        cmds = [
-            ["GetIncomingSignalInfo"],
-            ["GetOutgoingSignalInfo"],
-            ["GetAspectRatio"],
-            ["GetMaskingRatio"],
-            ["GetMacAddress"],
-        ]
-        for cmd in cmds:
-            await self.add_command_to_queue(cmd)
-
-    def connected(self) -> bool:
-        """Check if the client is connected."""
-        return (
-            self.reader is not None
-            and self.writer is not None
-            and not self.reader.at_eof()
-        )
-
-    async def add_command_to_queue(self, command: Iterable[str]) -> None:
-        """Add a command to the queue"""
-        self.logger.info("Adding command to queue: %s", command)
-        await self.command_queue.put(command)
-
-    def clear_queue(self) -> None:
-        """Clear queue."""
-        self.logger.info("Clearing command queue")
-        self.command_queue = asyncio.Queue()
-
     def stop(self) -> None:
         """Stop reconnecting"""
         self.logger.info("Setting stop flags")
         self.stop_heartbeat.set()
         self.stop_commands_flag.set()
 
-    # TODO: this should return a bool
     async def _reconnect(self) -> None:
         """
         Initiate a persistent connection to the device.
@@ -401,6 +341,71 @@ class Madvr:
         """
         response = os.system(f"ping -c 1 -W 2 {self.host}")
         return response == 0
+
+    async def _clear_attr(self) -> None:
+        """
+        Clear instance attr so HA doesn't report stale values and tells HA to write values to state
+        """
+        # Incoming attrs
+        self.msg_dict = {"is_on": False}  # Clear attributes and set 'is_on' to False
+        if self.update_callback:
+            self.update_callback(self.msg_dict)
+
+    async def close_connection(self) -> None:
+        """close the connection"""
+        self.logger.debug("closing connection")
+        try:
+            if self.writer:
+                self.writer.close()
+                await self.writer.wait_closed()
+        except (ConnectionResetError, AttributeError):
+            pass
+        self.writer = None
+        self.reader = None
+        self.connection_event.clear()
+        await self._clear_attr()
+
+    async def open_connection(self) -> None:
+        """Open a connection"""
+        self.logger.debug("Starting open connection")
+        try:
+            await self._reconnect()
+            self.logger.debug("Connection opened")
+        except (AckError, ConnectionError) as err:
+            self.logger.error("Error opening connection: %s", err)
+            raise ConnectionError("Error opening connection") from err
+
+        # once connected, try to refresh data once in the case the device was turned connected to while on already
+        cmds = [
+            ["GetIncomingSignalInfo"],
+            ["GetOutgoingSignalInfo"],
+            ["GetAspectRatio"],
+            ["GetMaskingRatio"],
+            ["GetMacAddress"],
+        ]
+        for cmd in cmds:
+            await self.add_command_to_queue(cmd)
+
+    def connected(self) -> bool:
+        """Check if the client is connected."""
+        return (
+            self.reader is not None
+            and self.writer is not None
+            and not self.reader.at_eof()
+        )
+
+    ##########################
+    # Commands
+    ##########################
+    async def add_command_to_queue(self, command: Iterable[str]) -> None:
+        """Add a command to the queue"""
+        self.logger.info("Adding command to queue: %s", command)
+        await self.command_queue.put(command)
+
+    def clear_queue(self) -> None:
+        """Clear queue."""
+        self.logger.info("Clearing command queue")
+        self.command_queue = asyncio.Queue()
 
     async def _construct_command(self, raw_command: list[str]) -> tuple[bytes, str]:
         """
