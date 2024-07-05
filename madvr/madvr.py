@@ -145,10 +145,12 @@ class Madvr:
                 self.logger.debug("sending queue command %s", command)
                 try:
                     await self.send_command(command)
-                except ConnectionResetError:
+                except NotImplementedError as err:
+                    self.logger.warning("Command not implemented: %s", err)
+                except (ConnectionError, ConnectionResetError):
                     self.logger.warning("Envy was turned off manually")
                     # update state that its off
-                    await self._clear_attr()
+                    await self._handle_power_off()
                 except AttributeError:
                     self.logger.warning("Issue sending command from queue")
                 except RetryExceededError:
@@ -505,62 +507,37 @@ class Madvr:
 
         return cmd, val
 
-    async def send_command(self, command: list) -> str:
+    async def send_command(self, command: list) -> None:
         """
-        send a given command same as the official madvr ones
-        To keep this simple, just send the command without reading response
+        Send a given command to the MadVR device.
 
-        command: list - command to send like [KeyPress, MENU]
-        Raises RetryExceededError
+        Args:
+            command: A list containing the command to send.
+
+        Raises:
+            NotImplementedError: If the command is not supported.
+            ConnectionError: If there's any connection-related issue.
         """
-
-        # Verify the command is supported
         try:
             cmd, enum_type = await self._construct_command(command)
         except NotImplementedError as err:
-            self.logger.warning("command not implemented: %s -- %s", command, err)
-            return f"Command not found: {command}"
+            self.logger.warning("Command not implemented: %s -- %s", command, err)
+            raise
 
-        self.logger.debug("using values: %s %s", cmd, enum_type)
+        self.logger.debug("Using values: %s %s", cmd, enum_type)
 
-        # simple retry logic
-        retry_count = 0
+        if not self.connected:
+            self.logger.error("Connection not established")
+            raise ConnectionError("Device not connected")
 
-        while retry_count < 5:
-            try:
-                if not self.connected:
-                    self.logger.warning("Connection not established, retrying")
-                    try:
-                        await self._reconnect()
-                    except ConnectionError as err:
-                        self.logger.error(
-                            "Connection error when sending command: %s", err
-                        )
-                        retry_count += 1
-                        continue
-                    retry_count += 1
-                    continue
-                async with self.lock:
-                    if self.writer:
-                        self.writer.write(cmd)
-                        await self.writer.drain()
-                return "ok"  # if success, break the loop
-            except ConnectionResetError as err:
-                # for now just assuming the envy was turned off
-                self.logger.warning(
-                    "Connection reset by peer. Assuming envy was turned off manually"
-                )
-                raise ConnectionResetError("Connection reset by peer") from err
-            except (TimeoutError, OSError) as err:
-                self.logger.debug(
-                    "OK receipt timed out or connection failed when reading OK, retrying - %s",
-                    err,
-                )
-                retry_count += 1
-                await asyncio.sleep(TASK_CPU_DELAY)  # sleep before retrying
-                continue
-
-        raise RetryExceededError("Retry exceeded")
+        try:
+            async with self.lock:
+                if self.writer:
+                    self.writer.write(cmd)
+                    await self.writer.drain()
+        except (ConnectionResetError, TimeoutError, OSError) as err:
+            self.logger.error("Error writing command to socket: %s", err)
+            raise ConnectionError("Failed to send command") from err
 
     async def _process_notifications(self, msg: str) -> None:
         """process data in real time"""
@@ -621,4 +598,4 @@ class Madvr:
         if self.connected:
             await self.send_command(["Standby"] if standby else ["PowerOff"])
 
-        await self.close_connection()
+        await self.close_connection()  #
