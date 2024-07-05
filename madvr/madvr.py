@@ -92,14 +92,18 @@ class Madvr:
         """Function to set the callback for updating HA state"""
         self.update_callback = callback
 
+    async def start_command_listener(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Start the commands listener"""
+        task_queue = loop.create_task(self.task_handle_queue())
+        self.tasks.append(task_queue)
+
     async def async_add_tasks(self) -> None:
         """Add background tasks."""
         # loop can be passed from HA
         if not self.loop:
             self.loop = asyncio.get_event_loop()
 
-        task_queue = self.loop.create_task(self.task_handle_queue())
-        self.tasks.append(task_queue)
+        await self.start_command_listener(self.loop)
 
         task_notif = self.loop.create_task(self.task_read_notifications())
         self.tasks.append(task_notif)
