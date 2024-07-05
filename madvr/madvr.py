@@ -358,7 +358,7 @@ class Madvr:
     async def is_device_connectable(self) -> bool:
         """Check if the device is connectable without ping."""
         try:
-            async with asyncio.timeout(2.0):
+            async with asyncio.timeout(SMALL_DELAY):
                 _, writer = await asyncio.open_connection(self.host, self.port)
                 writer.close()
                 await writer.wait_closed()
