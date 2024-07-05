@@ -130,6 +130,9 @@ class Madvr:
         for task in self.tasks:
             if not task.done():
                 task.cancel()
+        # Wait for all tasks to be cancelled
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        self.tasks.clear()
 
     ##########################
     # Background tasks
