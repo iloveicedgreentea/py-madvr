@@ -78,6 +78,8 @@ class NotificationProcessor:
                 "is_signal": True,
                 "incoming_res": info[0],
                 "incoming_frame_rate": info[1],
+                # 2D || 3D
+                "incoming_signal_type": info[2],
                 "incoming_color_space": info[3],
                 "incoming_bit_depth": info[4],
                 "hdr_flag": "HDR" in info[5],
@@ -92,6 +94,7 @@ class NotificationProcessor:
             {
                 "outgoing_res": info[0],
                 "outgoing_frame_rate": info[1],
+                "outgoing_signal_type": info[2],  # 2D || 3D
                 "outgoing_color_space": info[3],
                 "outgoing_bit_depth": info[4],
                 "outgoing_hdr_flag": "HDR" in info[5],

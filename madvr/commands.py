@@ -87,7 +87,14 @@ class SettingsPages(Enum):
 
 
 class Toggle(Enum):
-    pass
+    ToneMap = b"ToneMap"
+    HighlightRecovery = b"HighlightRecovery"
+    ContrastRecovery = b"ContrastRecovery"
+    ShadowRecovery = b"ShadowRecovery"
+    _3DLUT = b"3DLUT"
+    ScreenBoundaries = b"ScreenBoundaries"
+    Histogram = b"Histogram"
+    DebugOSD = b"DebugOSD"
 
 
 class SingleCmd(Enum):
@@ -142,7 +149,7 @@ class Commands(Enum):
     GetTemperatures = b"GetTemperatures", Temperatures, IsInformational.true
     GetMacAddress = b"GetMacAddress", SingleCmd, IsInformational.true
 
-    # toggle = b"Toggle"
+    Toggle = b"Toggle", Toggle, IsInformational.false
     ToneMapOn = b"ToneMapOn", SingleCmd, IsInformational.false
     ToneMapOff = b"ToneMapOff", SingleCmd, IsInformational.false
 
