@@ -205,15 +205,7 @@ class Madvr:
         """
 
         async def perform_heartbeat() -> None:
-            if not self.connected:
-                self.logger.warning("Connection not established")
-                raise HeartBeatError("Connection not established")
-
-            async with self.lock:
-                if self.writer:
-                    self.writer.write(self.HEARTBEAT)
-                    await self.writer.drain()
-                    self.logger.debug("Heartbeat complete")
+            await self._write_with_timeout(self.HEARTBEAT)
 
         async def handle_heartbeat_error(
             err: TimeoutError | OSError | HeartBeatError,
@@ -307,6 +299,32 @@ class Madvr:
         self.stop_heartbeat.set()
         self.stop_commands_flag.set()
 
+    async def _write_with_timeout(self, data: bytes) -> None:
+        """Write data to the socket with a timeout."""
+        if not self.connected:
+            self.logger.error("Connection not established. Reconnecting")
+            await self._reconnect()
+
+        if not self.writer:
+            self.logger.error("Writer is not initialized. Reconnecting")
+            await self._reconnect()
+
+        async def write_and_drain() -> None:
+            if not self.writer:
+                raise ConnectionError("Writer is not initialized")
+            self.writer.write(data)
+            await self.writer.drain()
+
+        try:
+            async with self.lock:
+                await asyncio.wait_for(write_and_drain(), timeout=self.connect_timeout)
+        except TimeoutError:
+            self.logger.error("Write operation timed out after %s seconds", self.connect_timeout)
+            await self._reconnect()
+        except (ConnectionResetError, OSError) as err:
+            self.logger.error("Error writing to socket: %s", err)
+            await self._reconnect()
+
     async def _reconnect(self) -> None:
         """
         Initiate a persistent connection to the device.
@@ -355,7 +373,7 @@ class Madvr:
                 writer.close()
                 await writer.wait_closed()
                 return True
-        except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+        except (TimeoutError, ConnectionRefusedError, OSError):
             return False
 
     async def _clear_attr(self) -> None:
@@ -514,15 +532,8 @@ class Madvr:
 
         self.logger.debug("Using values: %s %s", cmd, enum_type)
 
-        if not self.connected:
-            self.logger.error("Connection not established")
-            raise ConnectionError("Device not connected")
-
         try:
-            async with self.lock:
-                if self.writer:
-                    self.writer.write(cmd)
-                    await self.writer.drain()
+            await self._write_with_timeout(cmd)
         except (ConnectionResetError, TimeoutError, OSError) as err:
             self.logger.error("Error writing command to socket: %s", err)
             raise ConnectionError("Failed to send command") from err
@@ -582,6 +593,9 @@ class Madvr:
         # set the flag to delay the ping task to avoid race conditions
         self.powered_off_recently = True
         if self.connected:
-            await self.send_command(["Standby"] if standby else ["PowerOff"])
+            try:
+                await self.send_command(["Standby"] if standby else ["PowerOff"])
+            except ConnectionError as err:
+                self.logger.error("Error sending power off command: %s", err)
 
         await self.close_connection()  #
