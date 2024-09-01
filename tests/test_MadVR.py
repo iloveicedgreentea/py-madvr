@@ -1,78 +1,44 @@
-# test_madvr.py
-
 import pytest
 import asyncio
-import pytest_asyncio
-from madvr.madvr import Madvr
+from unittest.mock import AsyncMock, MagicMock, patch
+from madvr.madvr import Madvr, COMMAND_TIMEOUT, CONNECT_TIMEOUT, DEFAULT_PORT
+from madvr.errors import AckError, HeartBeatError, RetryExceededError
+
+@pytest.mark.asyncio
+async def test_init(mock_madvr):
+    assert mock_madvr.host == "192.168.1.100"
+    assert mock_madvr.port == DEFAULT_PORT
+    assert mock_madvr.connect_timeout == CONNECT_TIMEOUT
+    assert mock_madvr.command_read_timeout == COMMAND_TIMEOUT
+
+@pytest.mark.asyncio
+async def test_is_on(mock_madvr):
+    mock_madvr.msg_dict["is_on"] = True
+    assert mock_madvr.is_on == True
+
+@pytest.mark.asyncio
+async def test_mac_address(mock_madvr):
+    mock_madvr.msg_dict["mac_address"] = "00:11:22:33:44:55"
+    assert mock_madvr.mac_address == "00:11:22:33:44:55"
+
+@pytest.mark.asyncio
+async def test_set_update_callback(mock_madvr):
+    callback = MagicMock()
+    mock_madvr.set_update_callback(callback)
+    assert mock_madvr.update_callback == callback
+
+@pytest.mark.asyncio
+async def test_send_heartbeat(mock_madvr):
+    mock_madvr.connection_event.set()
+    
+    await mock_madvr.send_heartbeat(once=True)
+    
+    mock_madvr.writer.write.assert_called_once_with(mock_madvr.HEARTBEAT)
+    mock_madvr.writer.drain.assert_called_once()
 
 
-@pytest_asyncio.fixture(scope="session")
-async def madvr_instance():
-    print("Creating MadVR instance")
-    madvr = Madvr(host="192.168.88.38", port=44077)
-    await madvr.open_connection()
-    print("Madvr instance created")
-    yield madvr
-    print("Closing MadVR instance")
-    madvr.stop()
-    await madvr.close_connection()
-    madvr.ping_task.cancel()
-
-
-@pytest.mark.asyncio(scope="session")
-async def test_open_connection(madvr_instance):
-    assert madvr_instance.connected() is True
-    print("Connection opened")
-
-
-# @pytest.mark.asyncio
-# async def test_close_connection(madvr_instance):
-#     await madvr_instance.close_connection()
-#     assert madvr_instance.connected() is False
-#     await madvr_instance.open_connection()  # Reopen for the next tests
-
-
-@pytest.mark.asyncio(scope="session")
-async def test_process_info(madvr_instance):
-    print("Testing process info")
-    """Verify the process info func works to assign attrs, with modifications"""
-    await madvr_instance._process_notifications(
-        'Welcome\r\nOk\r\nIncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9\r\nAspectRatio 129x123 1.78 178 "TV"\r\nOutgoingSignalInfo 3840x2160 23.976p 2D 444 12bit HDR10 2020 TV\r\n'
-    )
-    await madvr_instance._process_notifications(
-        "IncomingSignalInfo 4096x2160 60p 2D 444 12bit HDR10 2020 TV 16:9\r\n"
-    )
-    assert madvr_instance.msg_dict == {
-        "incoming_res": "4096x2160",
-        "incoming_frame_rate": "60p",
-        "incoming_color_space": "444",
-        "incoming_bit_depth": "12bit",
-        "is_signal": True,
-        "hdr_flag": True,
-        "incoming_colorimetry": "2020",
-        "incoming_black_levels": "TV",
-        "incoming_aspect_ratio": "16:9",
-        "aspect_res": "129x123",
-        "aspect_dec": 1.78,
-        "aspect_int": "178",
-        "aspect_name": '"TV"',
-        "outgoing_res": "3840x2160",
-        "outgoing_frame_rate": "23.976p",
-        "outgoing_color_space": "444",
-        "outgoing_bit_depth": "12bit",
-        "outgoing_hdr_flag": True,
-        "outgoing_colorimetry": "2020",
-        "outgoing_black_levels": "TV",
-    }
-
-
-@pytest.mark.asyncio(scope="session")
-async def test_send_command(madvr_instance):
-    print("Testing send command")
-    """Verify the send command func works"""
-    try:
-        await asyncio.wait_for(madvr_instance.read_notifications(), timeout=5)
-    except asyncio.TimeoutError:
-        pass
-    result = await madvr_instance.send_command(["GetIncomingSignalInfo"])
-    assert result == "ok"
+@pytest.mark.asyncio
+async def test_add_command_to_queue(mock_madvr):
+    command = ["TestCommand"]
+    await mock_madvr.add_command_to_queue(command)
+    assert mock_madvr.command_queue.get_nowait() == command
