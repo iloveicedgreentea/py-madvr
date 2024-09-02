@@ -9,3 +9,4 @@ pre-commit
 mypy
 ruff
 pydantic
+pre-commit

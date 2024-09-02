@@ -1,6 +1,6 @@
 """Constants for madvr module."""
 
-REFRESH_TIME = 60
+REFRESH_TIME = 20
 PING_DELAY = 30
 COMMAND_TIMEOUT = 3
 PING_INTERVAL = 5

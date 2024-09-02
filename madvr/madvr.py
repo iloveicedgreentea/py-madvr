@@ -141,27 +141,21 @@ class Madvr:
         """Handle command queue."""
         while True:
             await self.connection_event.wait()
-            while (
-                not self.command_queue.empty() and not self.stop_commands_flag.is_set()
-            ):
+            while not self.command_queue.empty() and not self.stop_commands_flag.is_set():
                 command = await self.command_queue.get()
                 self.logger.debug("sending queue command %s", command)
                 try:
                     await self.send_command(command)
                 except NotImplementedError as err:
                     self.logger.warning("Command not implemented: %s", err)
-                except (ConnectionError, ConnectionResetError):
-                    self.logger.warning("Envy was turned off manually")
-                    # update state that its off
-                    await self._handle_power_off()
+                except (ConnectionError, ConnectionResetError, BrokenPipeError):
+                    self.logger.warning("Task Queue: Envy seems to be disconnected")
                 except AttributeError:
                     self.logger.warning("Issue sending command from queue")
                 except RetryExceededError:
                     self.logger.warning("Retry exceeded for command %s", command)
                 except OSError as err:
                     self.logger.error("Unexpected error when sending command: %s", err)
-                finally:
-                    self.command_queue.task_done()
 
             if self.stop_commands_flag.is_set():
                 self.clear_queue()
@@ -197,9 +191,7 @@ class Madvr:
                     # try to connect otherwise it will mark the device as offline
                     await self._reconnect()
                 except ConnectionError as e:
-                    self.logger.error(
-                        "Connection error when reading notifications: %s", e
-                    )
+                    self.logger.error("Connection error when reading notifications: %s", e)
                 continue
 
             await asyncio.sleep(TASK_CPU_DELAY)
@@ -213,15 +205,7 @@ class Madvr:
         """
 
         async def perform_heartbeat() -> None:
-            if not self.connected:
-                self.logger.warning("Connection not established")
-                raise HeartBeatError("Connection not established")
-
-            async with self.lock:
-                if self.writer:
-                    self.writer.write(self.HEARTBEAT)
-                    await self.writer.drain()
-                    self.logger.debug("Heartbeat complete")
+            await self._write_with_timeout(self.HEARTBEAT)
 
         async def handle_heartbeat_error(
             err: TimeoutError | OSError | HeartBeatError,
@@ -270,9 +254,7 @@ class Madvr:
                     try:
                         await self.open_connection()
                     except ConnectionError as err:
-                        self.logger.error(
-                            "Error opening connection after connectivity check: %s", err
-                        )
+                        self.logger.error("Error opening connection after connectivity check: %s", err)
             else:
                 self.logger.debug(
                     "Device is not connectable, retrying in %s seconds",
@@ -285,13 +267,18 @@ class Madvr:
             await asyncio.sleep(self.ping_interval)
 
     async def task_refresh_info(self) -> None:
-        """Task to refresh some device info every minute"""
+        """Task to refresh some device info every 20s"""
         while True:
             # wait until the connection is established
             await self.connection_event.wait()
             cmds = [
                 ["GetMacAddress"],
                 ["GetTemperatures"],
+                # get signal info in case a change was missed and its sitting in limbo
+                ["GetIncomingSignalInfo"],
+                ["GetOutgoingSignalInfo"],
+                ["GetAspectRatio"],
+                ["GetMaskingRatio"],
             ]
             for cmd in cmds:
                 await self.add_command_to_queue(cmd)
@@ -317,6 +304,32 @@ class Madvr:
         self.stop_heartbeat.set()
         self.stop_commands_flag.set()
 
+    async def _write_with_timeout(self, data: bytes) -> None:
+        """Write data to the socket with a timeout."""
+        if not self.connected:
+            self.logger.error("Connection not established. Reconnecting")
+            await self._reconnect()
+
+        if not self.writer:
+            self.logger.error("Writer is not initialized. Reconnecting")
+            await self._reconnect()
+
+        async def write_and_drain() -> None:
+            if not self.writer:
+                raise ConnectionError("Writer is not initialized")
+            self.writer.write(data)
+            await self.writer.drain()
+
+        try:
+            async with self.lock:
+                await asyncio.wait_for(write_and_drain(), timeout=self.connect_timeout)
+        except TimeoutError:
+            self.logger.error("Write operation timed out after %s seconds", self.connect_timeout)
+            await self._reconnect()
+        except (ConnectionResetError, OSError) as err:
+            self.logger.error("Error writing to socket: %s", err)
+            await self._reconnect()
+
     async def _reconnect(self) -> None:
         """
         Initiate a persistent connection to the device.
@@ -325,10 +338,10 @@ class Madvr:
         """
         # it will not try to connect until ping is successful
         if await self.is_device_connectable():
-            self.logger.info("Device is online")
+            self.logger.debug("Device is online")
 
             try:
-                self.logger.info("Connecting to Envy: %s:%s", self.host, self.port)
+                self.logger.debug("Connecting to Envy: %s:%s", self.host, self.port)
 
                 # Command client
                 self.reader, self.writer = await asyncio.wait_for(
@@ -343,14 +356,14 @@ class Madvr:
                 await self._set_connected(True)
                 self.stop_heartbeat.clear()
                 # send a heartbeat now
+                self.logger.debug("Sending heartbeat")
                 await self.send_heartbeat(once=True)
 
                 self.logger.info("Connection established")
+                self.stop_commands_flag.clear()
 
             except (TimeoutError, HeartBeatError, OSError) as err:
-                self.logger.error(
-                    "Heartbeat failed. Connection not established %s", err
-                )
+                self.logger.error("Heartbeat failed. Connection not established %s", err)
                 await self._set_connected(False)
                 raise ConnectionError("Heartbeat failed") from err
         else:
@@ -359,15 +372,22 @@ class Madvr:
             await self._handle_power_off()
 
     async def is_device_connectable(self) -> bool:
-        """Check if the device is connectable without ping."""
-        try:
-            async with asyncio.timeout(SMALL_DELAY):
-                _, writer = await asyncio.open_connection(self.host, self.port)
-                writer.close()
-                await writer.wait_closed()
-                return True
-        except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
-            return False
+        """Check if the device is connectable without ping. The device is only connectable when on."""
+        retry_count = 0
+        # loop because upgrading firmware can take a few seconds and will kill the connection
+        while retry_count < 10:
+            try:
+                async with asyncio.timeout(SMALL_DELAY):
+                    _, writer = await asyncio.open_connection(self.host, self.port)
+                    writer.close()
+                    await writer.wait_closed()
+                    return True
+            except (TimeoutError, ConnectionRefusedError, OSError):
+                await asyncio.sleep(SMALL_DELAY)
+                retry_count += 1
+                continue
+        self.logger.debug("Device is not connectable")
+        return False
 
     async def _clear_attr(self) -> None:
         """
@@ -400,7 +420,7 @@ class Madvr:
             self.logger.debug("Connection opened")
         except (AckError, ConnectionError) as err:
             self.logger.error("Error opening connection: %s", err)
-            raise ConnectionError("Error opening connection") from err
+            raise
 
         # once connected, try to refresh data once in the case the device was turned connected to while on already
         cmds = [
@@ -441,9 +461,7 @@ class Madvr:
             bytes: the value to send in bytes
             str: the 'msg' field in the Enum used to filter notifications
         """
-        self.logger.debug(
-            "raw_command: %s -- raw_command length: %s", raw_command, len(raw_command)
-        )
+        self.logger.debug("raw_command: %s -- raw_command length: %s", raw_command, len(raw_command))
         skip_val = False
         # HA seems to always send commands as a list even if you set them as a str
 
@@ -500,9 +518,7 @@ class Madvr:
                 cmd = command_base + Footer.footer.value
 
             except KeyError as exc:
-                raise NotImplementedError(
-                    "Incorrect parameter given for command"
-                ) from exc
+                raise NotImplementedError("Incorrect parameter given for command") from exc
         else:
             cmd = command_name + Footer.footer.value
 
@@ -529,15 +545,8 @@ class Madvr:
 
         self.logger.debug("Using values: %s %s", cmd, enum_type)
 
-        if not self.connected:
-            self.logger.error("Connection not established")
-            raise ConnectionError("Device not connected")
-
         try:
-            async with self.lock:
-                if self.writer:
-                    self.writer.write(cmd)
-                    await self.writer.drain()
+            await self._write_with_timeout(cmd)
         except (ConnectionResetError, TimeoutError, OSError) as err:
             self.logger.error("Error writing command to socket: %s", err)
             raise ConnectionError("Failed to send command") from err
@@ -574,8 +583,6 @@ class Madvr:
         """
         Power on the device
         """
-        # start processing commands
-        self.stop_commands_flag.clear()
 
         # use the detected mac or one that is supplied at init or function call
         mac_to_use = self.mac_address or self.mac or mac
@@ -585,9 +592,7 @@ class Madvr:
             send_magic_packet(mac_to_use, logger=self.logger)
         else:
             # without wol, you cant power on the device
-            self.logger.warning(
-                "No mac provided, no action to take. Implement your own WOL automation"
-            )
+            self.logger.warning("No mac provided, no action to take. Implement your own WOL automation")
 
     async def power_off(self, standby: bool = False) -> None:
         """
@@ -599,6 +604,9 @@ class Madvr:
         # set the flag to delay the ping task to avoid race conditions
         self.powered_off_recently = True
         if self.connected:
-            await self.send_command(["Standby"] if standby else ["PowerOff"])
+            try:
+                await self.send_command(["Standby"] if standby else ["PowerOff"])
+            except ConnectionError as err:
+                self.logger.error("Error sending power off command: %s", err)
 
         await self.close_connection()  #

@@ -1,78 +1,118 @@
-# test_madvr.py
+# type: ignore
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import asyncio
-import pytest_asyncio
-from madvr.madvr import Madvr
+
+from madvr.errors import HeartBeatError
 
 
-@pytest_asyncio.fixture(scope="session")
-async def madvr_instance():
-    print("Creating MadVR instance")
-    madvr = Madvr(host="192.168.88.38", port=44077)
-    await madvr.open_connection()
-    print("Madvr instance created")
-    yield madvr
-    print("Closing MadVR instance")
-    madvr.stop()
-    await madvr.close_connection()
-    madvr.ping_task.cancel()
+@pytest.mark.asyncio
+async def test_init(mock_madvr):
+    assert mock_madvr.host == "192.168.1.100"
+    assert mock_madvr.port == 44077  # Assuming DEFAULT_PORT is 44077
+    assert isinstance(mock_madvr.command_queue, asyncio.Queue)
 
 
-@pytest.mark.asyncio(scope="session")
-async def test_open_connection(madvr_instance):
-    assert madvr_instance.connected() is True
-    print("Connection opened")
+@pytest.mark.asyncio
+async def test_is_on_property(mock_madvr):
+    mock_madvr.msg_dict = {"is_on": True}
+    assert mock_madvr.is_on is True
+
+    mock_madvr.msg_dict = {"is_on": False}
+    assert mock_madvr.is_on is False
 
 
-# @pytest.mark.asyncio
-# async def test_close_connection(madvr_instance):
-#     await madvr_instance.close_connection()
-#     assert madvr_instance.connected() is False
-#     await madvr_instance.open_connection()  # Reopen for the next tests
+@pytest.mark.asyncio
+async def test_mac_address_property(mock_madvr):
+    mock_madvr.msg_dict = {"mac_address": "00:11:22:33:44:55"}
+    assert mock_madvr.mac_address == "00:11:22:33:44:55"
+
+    mock_madvr.msg_dict = {}
+    assert mock_madvr.mac_address == ""
 
 
-@pytest.mark.asyncio(scope="session")
-async def test_process_info(madvr_instance):
-    print("Testing process info")
-    """Verify the process info func works to assign attrs, with modifications"""
-    await madvr_instance._process_notifications(
-        'Welcome\r\nOk\r\nIncomingSignalInfo 3840x2160 23.976p 2D 422 10bit HDR10 2020 TV 16:9\r\nAspectRatio 129x123 1.78 178 "TV"\r\nOutgoingSignalInfo 3840x2160 23.976p 2D 444 12bit HDR10 2020 TV\r\n'
-    )
-    await madvr_instance._process_notifications(
-        "IncomingSignalInfo 4096x2160 60p 2D 444 12bit HDR10 2020 TV 16:9\r\n"
-    )
-    assert madvr_instance.msg_dict == {
-        "incoming_res": "4096x2160",
-        "incoming_frame_rate": "60p",
-        "incoming_color_space": "444",
-        "incoming_bit_depth": "12bit",
-        "is_signal": True,
-        "hdr_flag": True,
-        "incoming_colorimetry": "2020",
-        "incoming_black_levels": "TV",
-        "incoming_aspect_ratio": "16:9",
-        "aspect_res": "129x123",
-        "aspect_dec": 1.78,
-        "aspect_int": "178",
-        "aspect_name": '"TV"',
-        "outgoing_res": "3840x2160",
-        "outgoing_frame_rate": "23.976p",
-        "outgoing_color_space": "444",
-        "outgoing_bit_depth": "12bit",
-        "outgoing_hdr_flag": True,
-        "outgoing_colorimetry": "2020",
-        "outgoing_black_levels": "TV",
-    }
+@pytest.mark.asyncio
+async def test_set_update_callback(mock_madvr):
+    callback = MagicMock()
+    mock_madvr.set_update_callback(callback)
+    assert mock_madvr.update_callback == callback
 
 
-@pytest.mark.asyncio(scope="session")
-async def test_send_command(madvr_instance):
-    print("Testing send command")
-    """Verify the send command func works"""
-    try:
-        await asyncio.wait_for(madvr_instance.read_notifications(), timeout=5)
-    except asyncio.TimeoutError:
-        pass
-    result = await madvr_instance.send_command(["GetIncomingSignalInfo"])
-    assert result == "ok"
+@pytest.mark.asyncio
+async def test_async_add_tasks(mock_madvr):
+    with patch("asyncio.get_event_loop") as mock_loop:
+        mock_loop.return_value.create_task = AsyncMock()
+        await mock_madvr.async_add_tasks()
+        assert len(mock_madvr.tasks) == 5  # Assuming 5 tasks are created
+
+
+@pytest.mark.asyncio
+async def test_send_heartbeat(mock_madvr):
+    await mock_madvr.send_heartbeat(once=True)
+    mock_madvr._write_with_timeout.assert_called_once_with(mock_madvr.HEARTBEAT)
+
+
+@pytest.mark.asyncio
+async def test_send_heartbeat_error(mock_madvr):
+    mock_madvr._write_with_timeout = AsyncMock(side_effect=TimeoutError)
+    with pytest.raises(HeartBeatError):
+        await mock_madvr.send_heartbeat(once=True)
+
+
+@pytest.mark.asyncio
+async def test_open_connection(mock_madvr):
+    await mock_madvr.open_connection()
+
+    mock_madvr._reconnect.assert_called_once()
+    assert mock_madvr.add_command_to_queue.call_count == 5
+
+
+@pytest.mark.asyncio
+async def test_open_connection_error(mock_madvr):
+    mock_madvr._reconnect.side_effect = ConnectionError
+
+    with pytest.raises(ConnectionError):
+        await mock_madvr.open_connection()
+
+    mock_madvr.add_command_to_queue.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_power_on(mock_madvr, mock_send_magic_packet):
+    mock_madvr.msg_dict = {"mac_address": "00:11:22:33:44:55"}
+    mock_madvr.stop_commands_flag = MagicMock()
+    mock_madvr.stop_commands_flag.is_set.return_value = False
+
+    await mock_madvr.power_on()
+
+    mock_send_magic_packet.assert_called_once_with("00:11:22:33:44:55", logger=mock_madvr.logger)
+
+
+@pytest.mark.asyncio
+async def test_power_off(mock_madvr):
+    mock_madvr._construct_command.return_value = (b"PowerOff\r", "enum_type")
+
+    await mock_madvr.power_off()
+
+    mock_madvr.stop.assert_called_once()
+    assert mock_madvr.powered_off_recently is True
+    mock_madvr._construct_command.assert_called_once_with(["PowerOff"])
+    mock_madvr._write_with_timeout.assert_called_once_with(b"PowerOff\r")
+    mock_madvr.close_connection.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_power_off_standby(mock_madvr):
+    mock_madvr._construct_command.return_value = (b"Standby\r", "enum_type")
+
+    await mock_madvr.power_off(standby=True)
+
+    mock_madvr.stop.assert_called_once()
+    assert mock_madvr.powered_off_recently is True
+    mock_madvr._construct_command.assert_called_once_with(["Standby"])
+    mock_madvr._write_with_timeout.assert_called_once_with(b"Standby\r")
+    mock_madvr.close_connection.assert_called_once()
+
+
+# Add more tests as needed for other methods and edge cases
