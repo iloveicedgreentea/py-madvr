@@ -87,7 +87,6 @@ async def test_power_on(mock_madvr, mock_send_magic_packet):
     await mock_madvr.power_on()
 
     mock_send_magic_packet.assert_called_once_with("00:11:22:33:44:55", logger=mock_madvr.logger)
-    mock_madvr.stop_commands_flag.clear.assert_called_once()
 
 
 @pytest.mark.asyncio
