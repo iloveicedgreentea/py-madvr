@@ -267,13 +267,18 @@ class Madvr:
             await asyncio.sleep(self.ping_interval)
 
     async def task_refresh_info(self) -> None:
-        """Task to refresh some device info every minute"""
+        """Task to refresh some device info every 20s"""
         while True:
             # wait until the connection is established
             await self.connection_event.wait()
             cmds = [
                 ["GetMacAddress"],
                 ["GetTemperatures"],
+                # get signal info in case a change was missed and its sitting in limbo
+                ["GetIncomingSignalInfo"],
+                ["GetOutgoingSignalInfo"],
+                ["GetAspectRatio"],
+                ["GetMaskingRatio"],
             ]
             for cmd in cmds:
                 await self.add_command_to_queue(cmd)
