@@ -407,7 +407,7 @@ class Madvr:
             self.logger.debug("Connection opened")
         except (AckError, ConnectionError) as err:
             self.logger.error("Error opening connection: %s", err)
-            raise ConnectionError("Error opening connection") from err
+            raise
 
         # once connected, try to refresh data once in the case the device was turned connected to while on already
         cmds = [
