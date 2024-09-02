@@ -360,6 +360,7 @@ class Madvr:
                 await self.send_heartbeat(once=True)
 
                 self.logger.info("Connection established")
+                self.stop_commands_flag.clear()
 
             except (TimeoutError, HeartBeatError, OSError) as err:
                 self.logger.error("Heartbeat failed. Connection not established %s", err)
@@ -372,14 +373,21 @@ class Madvr:
 
     async def is_device_connectable(self) -> bool:
         """Check if the device is connectable without ping. The device is only connectable when on."""
-        try:
-            async with asyncio.timeout(SMALL_DELAY):
-                _, writer = await asyncio.open_connection(self.host, self.port)
-                writer.close()
-                await writer.wait_closed()
-                return True
-        except (TimeoutError, ConnectionRefusedError, OSError):
-            return False
+        retry_count = 0
+        # loop because upgrading firmware can take a few seconds and will kill the connection
+        while retry_count < 10:
+            try:
+                async with asyncio.timeout(SMALL_DELAY):
+                    _, writer = await asyncio.open_connection(self.host, self.port)
+                    writer.close()
+                    await writer.wait_closed()
+                    return True
+            except (TimeoutError, ConnectionRefusedError, OSError):
+                await asyncio.sleep(SMALL_DELAY)
+                retry_count += 1
+                continue
+        self.logger.debug("Device is not connectable")
+        return False
 
     async def _clear_attr(self) -> None:
         """
@@ -575,8 +583,6 @@ class Madvr:
         """
         Power on the device
         """
-        # start processing commands
-        self.stop_commands_flag.clear()
 
         # use the detected mac or one that is supplied at init or function call
         mac_to_use = self.mac_address or self.mac or mac
