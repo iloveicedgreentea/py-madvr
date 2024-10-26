@@ -11,7 +11,7 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/iloveicedgreentea/py-madvr",
-    packages=setuptools.find_packages(),
+    packages=setuptools.find_packages(exclude=["tests","tests.*"]),
     package_data={"py_madvr2": ["py.typed"]},
     classifiers=[
         "Programming Language :: Python :: 3.12",
