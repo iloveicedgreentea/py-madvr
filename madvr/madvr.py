@@ -204,12 +204,9 @@ class Madvr:
                     timeout=self.command_read_timeout,
                 )
 
-                # An empty message typically means the connection was closed
+                # An empty message is probably fine
                 if not msg:
-                    self.logger.warning(
-                        "Empty message received - connection likely closed"
-                    )
-                    await self._handle_power_off()
+                    self.logger.warning("Empty message received")
                     continue
 
                 try:
