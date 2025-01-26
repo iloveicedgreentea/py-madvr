@@ -105,7 +105,6 @@ class Madvr:
 
     async def async_add_tasks(self) -> None:
         """Add background tasks with error handling."""
-        # loop can be passed from HA
         if not self.loop:
             self.loop = asyncio.get_event_loop()
 
@@ -132,15 +131,27 @@ class Madvr:
         # start tasks in wrapper
         for coro, name in task_definitions:
             task = self.loop.create_task(wrapped_task(coro, name))
+            task.set_name(name)  # Set task name for identification
             self.tasks.append(task)
 
     async def async_cancel_tasks(self) -> None:
-        """Cancel all tasks."""
+        """Cancel all tasks except ping unless final shutdown."""
+        non_ping_tasks = []
+
+        # Separate ping task from other tasks
         for task in self.tasks:
+            if task.get_name() == "ping":
+                continue
+
+            non_ping_tasks.append(task)
             if not task.done():
                 task.cancel()
-        # Wait for all tasks to be cancelled
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+
+        # Wait for non-ping tasks to cancel
+        if non_ping_tasks:
+            await asyncio.gather(*non_ping_tasks, return_exceptions=True)
+
+        # Clear task list but preserve ping task if not shutting down
         self.tasks.clear()
 
     ##########################
@@ -273,42 +284,62 @@ class Madvr:
 
     async def task_ping_until_alive(self) -> None:
         """Check if the device is connectable and connect to it on success."""
+        consecutive_failures = 0
+        MAX_FAILURES = 3
+
         while True:
-            # this will induce flapping otherwise
-            if self.powered_off_recently:
-                self.logger.debug(
-                    "Device was recently powered off, waiting for %s seconds",
-                    self.ping_delay_after_power_off,
-                )
-                await asyncio.sleep(self.ping_delay_after_power_off)
-                # reset the flag
-                self.powered_off_recently = False
+            try:
+                # this will induce flapping otherwise
+                if self.powered_off_recently:
+                    self.logger.debug(
+                        "Device was recently powered off, waiting for %s seconds",
+                        self.ping_delay_after_power_off,
+                    )
+                    await asyncio.sleep(self.ping_delay_after_power_off)
+                    # reset the flag
+                    self.powered_off_recently = False
 
-            is_connectable = await self.is_device_connectable()
-
-            if is_connectable:
-                # Double-check connectivity after a short delay
-                await asyncio.sleep(SMALL_DELAY)
                 is_connectable = await self.is_device_connectable()
 
-                if is_connectable and not self.connected:
-                    self.logger.debug("Device is connectable, attempting to connect")
-                    try:
-                        await self.open_connection()
-                    except ConnectionError as err:
-                        self.logger.error(
-                            "Error opening connection after connectivity check: %s", err
-                        )
-            else:
-                self.logger.debug(
-                    "Device is not connectable, retrying in %s seconds",
-                    self.ping_interval,
-                )
-                # if its not connectable but we are "connected", then the device was turned off
-                if self.connected:
-                    await self._handle_power_off()
+                if is_connectable:
+                    consecutive_failures = 0  # Reset failure counter on success
+                    # Double-check connectivity after a short delay
+                    await asyncio.sleep(SMALL_DELAY)
+                    is_connectable = await self.is_device_connectable()
 
-            await asyncio.sleep(self.ping_interval)
+                    if is_connectable and not self.connected:
+                        self.logger.debug(
+                            "Device is connectable, attempting to connect"
+                        )
+                        try:
+                            await self.open_connection()
+                        except ConnectionError as err:
+                            self.logger.error(
+                                "Error opening connection after connectivity check: %s",
+                                err,
+                            )
+                            consecutive_failures += 1
+                else:
+                    self.logger.debug(
+                        "Device is not connectable, retrying in %s seconds",
+                        self.ping_interval,
+                    )
+                    # if its not connectable but we are "connected", then the device was turned off
+                    if self.connected:
+                        consecutive_failures += 1
+                        if consecutive_failures >= MAX_FAILURES:
+                            self.logger.warning(
+                                "Multiple consecutive connection failures, forcing reconnect"
+                            )
+                            await self._handle_power_off()
+                            consecutive_failures = 0
+
+                await asyncio.sleep(self.ping_interval)
+
+            except Exception as err:
+                self.logger.exception("Unexpected error in ping task: %s", err)
+                # Don't let errors kill the ping task
+                await asyncio.sleep(self.ping_interval)
 
     async def task_refresh_info(self) -> None:
         """Task to refresh some device info every 20s"""
