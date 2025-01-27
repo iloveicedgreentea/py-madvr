@@ -702,38 +702,37 @@ class Madvr:
 
     async def power_on(self, mac: str = "") -> None:
         """Power on the device with improved state handling."""
-        async with self.lock:  # Prevent race conditions
-            # Reset flags before starting
-            self.stop_commands_flag.clear()
 
-            # use the detected mac or one that is supplied at init or function call
-            mac_to_use = self.mac_address or self.mac or mac
-            if mac_to_use:
-                self.logger.debug("Turning on with mac %s", mac_to_use)
-                send_magic_packet(mac_to_use, logger=self.logger)
+        # Reset flags before starting
+        self.stop_commands_flag.clear()
 
-                # Reset the powered_off flag after sending WOL
-                # This allows the ping task to start checking connectivity
-                self.powered_off_recently = False
-            else:
-                self.logger.warning(
-                    "No mac provided, no action to take. Implement your own WOL automation"
-                )
+        # use the detected mac or one that is supplied at init or function call
+        mac_to_use = self.mac_address or self.mac or mac
+        if mac_to_use:
+            self.logger.debug("Turning on with mac %s", mac_to_use)
+            send_magic_packet(mac_to_use, logger=self.logger)
+
+            # Reset the powered_off flag after sending WOL
+            # This allows the ping task to start checking connectivity
+            self.powered_off_recently = False
+        else:
+            self.logger.warning(
+                "No mac provided, no action to take. Implement your own WOL automation"
+            )
 
     async def power_off(self, standby: bool = False) -> None:
         """Turn off madvr or set to standby with improved state handling."""
-        async with self.lock:  # Prevent race conditions with other operations
-            self.stop()
-            self.powered_off_recently = True
+        self.stop()
+        self.powered_off_recently = True
 
-            if self.connected:
-                try:
-                    await self.send_command(["Standby"] if standby else ["PowerOff"])
-                    # Give the device a moment to process the command
-                    await asyncio.sleep(SMALL_DELAY)
-                except ConnectionError:
-                    self.logger.warning(
-                        "Connection error while sending power off command - device might already be off"
-                    )
+        if self.connected:
+            try:
+                await self.send_command(["Standby"] if standby else ["PowerOff"])
+                # Give the device a moment to process the command
+                await asyncio.sleep(SMALL_DELAY)
+            except ConnectionError:
+                self.logger.warning(
+                    "Connection error while sending power off command - device might already be off"
+                )
 
-            await self.close_connection()
+        await self.close_connection()
