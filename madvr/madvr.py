@@ -217,7 +217,7 @@ class Madvr:
 
                 # An empty message is probably fine
                 if not msg:
-                    self.logger.warning("Empty message received")
+                    self.logger.debug("Empty message received")
                     continue
 
                 try:
