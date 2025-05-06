@@ -402,10 +402,10 @@ class Madvr:
             self.logger.error(
                 "Write operation timed out after %s seconds", self.connect_timeout
             )
-            await self._reconnect()
+            await self._handle_power_off() # Use consistent error handling
         except (ConnectionResetError, OSError) as err:
             self.logger.error("Error writing to socket: %s", err)
-            await self._reconnect()
+            await self._handle_power_off() # Use consistent error handling
 
     async def _reconnect(self) -> None:
         """
