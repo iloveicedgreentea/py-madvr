@@ -11,3 +11,4 @@ READ_LIMIT = 8000
 SMALL_DELAY = 2
 # save some cpu cycles
 TASK_CPU_DELAY = 0.1
+MAX_COMMAND_QUEUE_SIZE = 100  # Maximum number of commands to buffer

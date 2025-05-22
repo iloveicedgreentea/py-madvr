@@ -12,6 +12,7 @@ from madvr.consts import (
     CONNECT_TIMEOUT,
     DEFAULT_PORT,
     HEARTBEAT_INTERVAL,
+    MAX_COMMAND_QUEUE_SIZE,  # Added import
     PING_DELAY,
     PING_INTERVAL,
     READ_LIMIT,
@@ -55,7 +56,7 @@ class Madvr:
         self.stop_heartbeat = asyncio.Event()
 
         # command queue to store commands as they come in
-        self.command_queue: asyncio.Queue = asyncio.Queue()
+        self.command_queue: asyncio.Queue = asyncio.Queue(maxsize=MAX_COMMAND_QUEUE_SIZE)  # Use maxsize
         self.stop_commands_flag = asyncio.Event()
 
         # background tasks
@@ -181,7 +182,16 @@ class Madvr:
                     )
                     # Put the command back in the queue unless it's a power command
                     if not any(cmd in ["PowerOff", "Standby"] for cmd in command):
-                        await self.command_queue.put(command)
+                        try:
+                            self.command_queue.put_nowait(command)
+                            self.logger.debug(
+                                "Command %s re-queued after connection error.", command
+                            )
+                        except asyncio.QueueFull:
+                            self.logger.warning(
+                                "Command queue full. Cannot re-queue command %s after connection error. Discarding.",
+                                command,
+                            )
                     await self._handle_power_off()
                     break  # Exit the inner loop to wait for reconnection
                 except Exception as err:
@@ -561,7 +571,12 @@ class Madvr:
     async def add_command_to_queue(self, command: Iterable[str]) -> None:
         """Add a command to the queue"""
         self.logger.info("Adding command to queue: %s", command)
-        await self.command_queue.put(command)
+        try:
+            self.command_queue.put_nowait(command)
+        except asyncio.QueueFull:
+            self.logger.warning(
+                "Command queue is full. Discarding command: %s", command
+            )
 
     def clear_queue(self) -> None:
         """Clear queue."""
