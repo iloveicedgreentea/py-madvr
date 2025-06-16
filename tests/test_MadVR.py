@@ -42,20 +42,45 @@ async def test_set_update_callback(mock_madvr):
 @pytest.mark.asyncio
 async def test_async_add_tasks(mock_madvr):
     with patch("asyncio.get_event_loop") as mock_loop:
-        mock_loop.return_value.create_task = AsyncMock()
+        mock_task = MagicMock()
+        mock_task.set_name = MagicMock()
+        mock_loop.return_value.create_task = MagicMock(return_value=mock_task)
         await mock_madvr.async_add_tasks()
         assert len(mock_madvr.tasks) == 5  # Assuming 5 tasks are created
 
 
 @pytest.mark.asyncio
 async def test_send_heartbeat(mock_madvr):
+    # Set up the writer mock properly
+    mock_writer = MagicMock()
+    mock_writer.write = MagicMock()
+    mock_writer.drain = AsyncMock()
+    mock_madvr.writer = mock_writer
+
+    # Create a proper async context manager mock
+    async_lock_mock = AsyncMock()
+    async_lock_mock.__aenter__ = AsyncMock(return_value=None)
+    async_lock_mock.__aexit__ = AsyncMock(return_value=None)
+    mock_madvr.lock = async_lock_mock
+
     await mock_madvr.send_heartbeat(once=True)
-    mock_madvr._write_with_timeout.assert_called_once_with(mock_madvr.HEARTBEAT)
+    mock_writer.write.assert_called_once_with(mock_madvr.HEARTBEAT)
 
 
 @pytest.mark.asyncio
 async def test_send_heartbeat_error(mock_madvr):
-    mock_madvr._write_with_timeout = AsyncMock(side_effect=TimeoutError)
+    # Set up the writer mock to raise an error
+    mock_writer = MagicMock()
+    mock_writer.write = MagicMock()
+    mock_writer.drain = AsyncMock(side_effect=ConnectionError("Test error"))
+    mock_madvr.writer = mock_writer
+
+    # Create a proper async context manager mock
+    async_lock_mock = AsyncMock()
+    async_lock_mock.__aenter__ = AsyncMock(return_value=None)
+    async_lock_mock.__aexit__ = AsyncMock(return_value=None)
+    mock_madvr.lock = async_lock_mock
+
     with pytest.raises(HeartBeatError):
         await mock_madvr.send_heartbeat(once=True)
 
@@ -65,7 +90,8 @@ async def test_open_connection(mock_madvr):
     await mock_madvr.open_connection()
 
     mock_madvr._reconnect.assert_called_once()
-    assert mock_madvr.add_command_to_queue.call_count == 5
+    # Updated to match the new reduced command count (3 instead of 5)
+    assert mock_madvr.add_command_to_queue.call_count == 3
 
 
 @pytest.mark.asyncio
@@ -113,6 +139,3 @@ async def test_power_off_standby(mock_madvr):
     mock_madvr._construct_command.assert_called_once_with(["Standby"])
     mock_madvr._write_with_timeout.assert_called_once_with(b"Standby\r")
     mock_madvr.close_connection.assert_called_once()
-
-
-# Add more tests as needed for other methods and edge cases

@@ -15,6 +15,9 @@ class NotificationProcessor:
         self.logger.debug("Processing notifications: %s", msg)
         notifications = msg.strip().split("\r\n")
 
+        # Create a fresh dict for this processing to avoid accumulation
+        result_dict = {}
+
         for notification in notifications:
             # ignore ok
             if not notification or notification == "OK":
@@ -29,15 +32,21 @@ class NotificationProcessor:
             self.logger.debug("Processing notification Title: %s", title)
 
             if title == "PowerOff":
-                self.msg_dict["is_on"] = False
+                result_dict["is_on"] = False
+                result_dict["power_off"] = True
             elif title == "NoSignal":
-                self.msg_dict["is_signal"] = False
+                result_dict["is_signal"] = False
             elif title == "Standby":
-                self.msg_dict["is_on"] = False
+                result_dict["is_on"] = False
+                result_dict["power_off"] = True
             else:
+                # Clear the internal dict before processing new signal info
+                self.msg_dict.clear()
                 self._process_signal_info(title, signal_info.split())
+                # Copy relevant processed data to result
+                result_dict.update(self.msg_dict)
 
-        return self.msg_dict
+        return result_dict
 
     def _process_signal_info(self, title: str, signal_info: list[str]) -> None:
         processors = {
@@ -58,6 +67,10 @@ class NotificationProcessor:
             except (KeyError, IndexError) as e:
                 self.logger.error(f"Error processing {title}: {e}")
                 self.logger.debug(f"Signal info: {signal_info}")
+
+    def clear_state(self) -> None:
+        """Clear all stored state - call this on reconnection"""
+        self.msg_dict.clear()
 
     def _process_mac_address(self, info: list[str]) -> None:
         self.msg_dict["mac_address"] = info[0]
