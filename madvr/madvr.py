@@ -667,14 +667,31 @@ class Madvr:
                 # add the base command
                 command_base: bytes = command_name
 
-                # append each value with a space
-                for value in values:
-                    # if value is a number, use it directly
-                    if value.isnumeric():  # encode 1 for ActivateProfile
-                        command_base += b" " + value.encode("utf-8")
-                    else:
-                        # else use the enum
-                        command_base += b" " + val[value.lstrip(" ")].value
+                # Special handling for commands that accept string parameters
+                if command in ["DisplayMessage", "DisplayAudioVolume"]:
+                    # For DisplayMessage: first param is timeout (numeric), rest is message
+                    # For DisplayAudioVolume: all params before last are numeric, last is unit string
+                    for i, value in enumerate(values):
+                        if command == "DisplayMessage" and i == 0 and value.isnumeric():
+                            # First parameter is timeout
+                            command_base += b" " + value.encode("utf-8")
+                        elif command == "DisplayAudioVolume" and i < len(values) - 1 and value.isnumeric():
+                            # All but last parameter are numeric
+                            command_base += b" " + value.encode("utf-8")
+                        else:
+                            # String parameter - wrap in quotes if not already wrapped
+                            if not (value.startswith('"') and value.endswith('"')):
+                                value = f'"{value}"'
+                            command_base += b" " + value.encode("utf-8")
+                else:
+                    # Original logic for other commands
+                    for value in values:
+                        # if value is a number, use it directly
+                        if value.isnumeric():  # encode 1 for ActivateProfile
+                            command_base += b" " + value.encode("utf-8")
+                        else:
+                            # else use the enum
+                            command_base += b" " + val[value.lstrip(" ")].value
 
                 # Construct command based on required values
                 cmd = command_base + Footer.footer.value
