@@ -78,6 +78,16 @@ class DisplayAlert(Enum):
     pass
 
 
+class DisplayMessage(Enum):
+    """For DisplayMessage command parameters"""
+    pass
+
+
+class DisplayAudioVolume(Enum):
+    """For DisplayAudioVolume command parameters"""
+    pass
+
+
 class Information(Enum):
     pass
 
@@ -156,3 +166,9 @@ class Commands(Enum):
     Hotplug = b"Hotplug", SingleCmd, IsInformational.false
     RefreshLicenseInfo = b"RefreshLicenseInfo", SingleCmd, IsInformational.false
     Force1080p60Output = b"Force1080p60Output", SingleCmd, IsInformational.false
+
+    # Display commands
+    DisplayMessage = b"DisplayMessage", DisplayMessage, IsInformational.false
+    DisplayAudioVolume = b"DisplayAudioVolume", DisplayAudioVolume, IsInformational.false
+    DisplayAudioMute = b"DisplayAudioMute", SingleCmd, IsInformational.false
+    CloseAudioMute = b"CloseAudioMute", SingleCmd, IsInformational.false

@@ -779,3 +779,33 @@ class Madvr:
                 )
 
         await self.close_connection()
+
+    async def display_message(self, timeout_seconds: int, message: str) -> None:
+        """Display a message on screen for specified timeout.
+
+        Args:
+            timeout_seconds: Number of seconds to display the message
+            message: Text message to display
+        """
+        command = ["DisplayMessage", str(timeout_seconds), f'"{message}"']
+        await self.add_command_to_queue(command)
+
+    async def display_audio_volume(self, min_value: int, current_value: int, max_value: int, unit: str) -> None:
+        """Display audio volume control GUI.
+
+        Args:
+            min_value: Minimum volume value
+            current_value: Current volume value
+            max_value: Maximum volume value
+            unit: Unit description (e.g. "dB", "%")
+        """
+        command = ["DisplayAudioVolume", str(min_value), str(current_value), str(max_value), f'"{unit}"']
+        await self.add_command_to_queue(command)
+
+    async def display_audio_mute(self) -> None:
+        """Display audio mute indicator."""
+        await self.add_command_to_queue(["DisplayAudioMute"])
+
+    async def close_audio_mute(self) -> None:
+        """Close audio mute indicator."""
+        await self.add_command_to_queue(["CloseAudioMute"])

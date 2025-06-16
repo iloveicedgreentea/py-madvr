@@ -139,3 +139,27 @@ async def test_power_off_standby(mock_madvr):
     mock_madvr._construct_command.assert_called_once_with(["Standby"])
     mock_madvr._write_with_timeout.assert_called_once_with(b"Standby\r")
     mock_madvr.close_connection.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_display_message(mock_madvr):
+    await mock_madvr.display_message(5, "Test message")
+    mock_madvr.add_command_to_queue.assert_called_once_with(["DisplayMessage", "5", '"Test message"'])
+
+
+@pytest.mark.asyncio
+async def test_display_audio_volume(mock_madvr):
+    await mock_madvr.display_audio_volume(0, 50, 100, "%")
+    mock_madvr.add_command_to_queue.assert_called_once_with(["DisplayAudioVolume", "0", "50", "100", '"%"'])
+
+
+@pytest.mark.asyncio
+async def test_display_audio_mute(mock_madvr):
+    await mock_madvr.display_audio_mute()
+    mock_madvr.add_command_to_queue.assert_called_once_with(["DisplayAudioMute"])
+
+
+@pytest.mark.asyncio
+async def test_close_audio_mute(mock_madvr):
+    await mock_madvr.close_audio_mute()
+    mock_madvr.add_command_to_queue.assert_called_once_with(["CloseAudioMute"])
