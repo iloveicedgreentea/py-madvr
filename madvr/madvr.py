@@ -85,6 +85,7 @@ class Madvr:
         self.notification_processor = NotificationProcessor(self.logger)
         self.powered_off_recently: bool = False
         self.ping_delay_after_power_off: int = PING_DELAY
+        self._reconnecting: bool = False  # Prevent recursive reconnection
         self.logger.debug("Running in debug mode")
 
     ##########################
@@ -391,13 +392,8 @@ class Madvr:
 
     async def _write_with_timeout(self, data: bytes) -> None:
         """Write data to the socket with a timeout."""
-        if not self.connected:
-            self.logger.error("Connection not established. Reconnecting")
-            await self._reconnect()
-
-        if not self.writer:
-            self.logger.error("Writer is not initialized. Reconnecting")
-            await self._reconnect()
+        if not self.connected or not self.writer:
+            raise ConnectionError("Connection not established")
 
         async def write_and_drain() -> None:
             if not self.writer:
@@ -423,58 +419,81 @@ class Madvr:
 
         Raises AckError, ConnectionError
         """
-        # it will not try to connect until ping is successful
-        if await self.is_device_connectable():
-            self.logger.debug("Device is online")
+        # Prevent recursive reconnection attempts
+        if self._reconnecting:
+            self.logger.warning("Already attempting to reconnect, skipping")
+            return
 
-            try:
-                self.logger.debug("Connecting to Envy: %s:%s", self.host, self.port)
+        self._reconnecting = True
+        try:
+            # it will not try to connect until ping is successful
+            if await self.is_device_connectable():
+                self.logger.debug("Device is online")
 
-                # Command client
-                self.reader, self.writer = await asyncio.wait_for(
-                    asyncio.open_connection(self.host, self.port),  # type: ignore[arg-type]
-                    timeout=5,
-                )
-                self.logger.debug("Handshaking")
-                self.logger.info("Waiting for envy to be available")
+                try:
+                    self.logger.debug("Connecting to Envy: %s:%s", self.host, self.port)
 
-                await asyncio.sleep(SMALL_DELAY)
-                # unblock heartbeat task
-                await self._set_connected(True)
-                self.stop_heartbeat.clear()
-                # send a heartbeat now
-                self.logger.debug("Sending heartbeat")
-                await self.send_heartbeat(once=True)
+                    # Clear notification processor state before new connection
+                    self.notification_processor.clear_state()
 
-                self.logger.info("Connection established")
-                self.stop_commands_flag.clear()
+                    # Command client
+                    self.reader, self.writer = await asyncio.wait_for(
+                        asyncio.open_connection(self.host, self.port),  # type: ignore[arg-type]
+                        timeout=5,
+                    )
+                    self.logger.debug("Handshaking")
+                    self.logger.info("Waiting for envy to be available")
 
-            except (TimeoutError, HeartBeatError, OSError) as err:
-                self.logger.error(
-                    "Heartbeat failed. Connection not established %s", err
-                )
-                await self._set_connected(False)
-                raise ConnectionError("Heartbeat failed") from err
-        else:
-            # the device is off
-            self.logger.debug("Device is offline")
-            await self._handle_power_off()
+                    await asyncio.sleep(SMALL_DELAY)
+                    # unblock heartbeat task
+                    await self._set_connected(True)
+                    self.stop_heartbeat.clear()
+                    # send a heartbeat now
+                    self.logger.debug("Sending heartbeat")
+                    await self.send_heartbeat(once=True)
+
+                    self.logger.info("Connection established")
+                    self.stop_commands_flag.clear()
+
+                except (TimeoutError, HeartBeatError, OSError) as err:
+                    self.logger.error(
+                        "Heartbeat failed. Connection not established %s", err
+                    )
+                    await self._set_connected(False)
+                    raise ConnectionError("Heartbeat failed") from err
+            else:
+                # the device is off
+                self.logger.debug("Device is offline")
+                await self._handle_power_off()
+        finally:
+            self._reconnecting = False
 
     async def is_device_connectable(self) -> bool:
         """Check if the device is connectable without ping. The device is only connectable when on."""
         retry_count = 0
-        # loop because upgrading firmware can take a few seconds and will kill the connection
-        while retry_count < 10:
+        # Reduce retry count to prevent resource exhaustion
+        MAX_RETRIES = 3
+
+        while retry_count < MAX_RETRIES:
+            writer = None
             try:
                 async with asyncio.timeout(SMALL_DELAY):
                     _, writer = await asyncio.open_connection(self.host, self.port)
-                    writer.close()
-                    await writer.wait_closed()
                     return True
             except (TimeoutError, ConnectionRefusedError, OSError):
-                await asyncio.sleep(SMALL_DELAY)
-                retry_count += 1
-                continue
+                pass
+            finally:
+                # Ensure writer is always properly closed
+                if writer and not writer.is_closing():
+                    try:
+                        writer.close()
+                        await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+                    except Exception as e:
+                        self.logger.debug("Error closing test connection: %s", e)
+
+            await asyncio.sleep(SMALL_DELAY)
+            retry_count += 1
+
         self.logger.debug("Device is not connectable")
         return False
 
@@ -513,6 +532,8 @@ class Madvr:
 
         self.writer = None
         self.reader = None
+        self._reconnecting = False  # Reset reconnection flag
+        self.notification_processor.clear_state()  # Clear notification state
         await self._set_connected(False)
         await self._clear_attr()
         self.logger.debug("Connection closed and state cleared")
@@ -530,19 +551,19 @@ class Madvr:
                 await self._reconnect()
                 self.logger.debug("Connection opened successfully")
 
-                # Refresh initial device state
+                # Refresh initial device state with conservative rate limiting
                 refresh_commands = [
+                    ["GetMacAddress"],  # Get MAC first as it's most important
                     ["GetIncomingSignalInfo"],
                     ["GetOutgoingSignalInfo"],
-                    ["GetAspectRatio"],
-                    ["GetMaskingRatio"],
-                    ["GetMacAddress"],
                 ]
 
-                # Add commands with small delay between each to avoid overwhelming the device
-                for cmd in refresh_commands:
+                # Add commands with longer delay to prevent overwhelming device on startup
+                for i, cmd in enumerate(refresh_commands):
                     await self.add_command_to_queue(cmd)
-                    await asyncio.sleep(0.1)
+                    # Stagger the first few commands more aggressively
+                    delay = 0.5 if i == 0 else 0.3
+                    await asyncio.sleep(delay)
 
                 return
 
@@ -579,9 +600,16 @@ class Madvr:
             )
 
     def clear_queue(self) -> None:
-        """Clear queue."""
+        """Clear queue while maintaining maxsize."""
         self.logger.info("Clearing command queue")
-        self.command_queue = asyncio.Queue()
+        # Drain existing queue first
+        while not self.command_queue.empty():
+            try:
+                self.command_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # Recreate with same maxsize to ensure bounds are maintained
+        self.command_queue = asyncio.Queue(maxsize=MAX_COMMAND_QUEUE_SIZE)
 
     async def _construct_command(self, raw_command: list[str]) -> tuple[bytes, str]:
         """
