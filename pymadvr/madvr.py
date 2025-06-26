@@ -42,7 +42,7 @@ class Madvr:
         self.connect_timeout: int = connect_timeout
         self.logger = logger
 
-        # Simple connection pool for user commands (background tasks use direct connections)
+        # Simple connection pool for user commands
         self.connection_pool = SimpleConnectionPool(host, port, logger)
 
         # Background tasks
@@ -77,8 +77,6 @@ class Madvr:
 
         self.notification_processor = NotificationProcessor(self.logger)
         self.powered_off_recently: bool = False
-
-        self.logger.debug("Initialized connection-per-command MadVR client")
 
     ##########################
     # Properties
@@ -118,7 +116,7 @@ class Madvr:
         self.notification_heartbeat_task = self.loop.create_task(self._notification_heartbeat_wrapper())
         self.notification_heartbeat_task.set_name("notification_heartbeat")
 
-        # Start ping task for device monitoring and connection pre-warming
+        # Start ping task for device monitoring
         self.ping_task = self.loop.create_task(self._ping_task_wrapper())
         self.ping_task.set_name("ping")
 
@@ -206,9 +204,6 @@ class Madvr:
             except asyncio.CancelledError:
                 pass
 
-        # Note: Ping and Refresh tasks are NOT cancelled here - they should run forever
-        # Ping monitors device availability, Refresh updates display info when device is on
-
         # Close notification connection
         if self.notification_writer:
             try:
@@ -236,7 +231,7 @@ class Madvr:
             self.logger.debug("Starting background tasks")
             await self.async_add_tasks()
 
-            # Wait a moment for the heartbeat task to establish the connection
+            # Wait for heartbeat task to establish connection
             await asyncio.sleep(0.5)
 
             # Get initial device information
@@ -256,7 +251,6 @@ class Madvr:
                 asyncio.open_connection(self.host, self.port), timeout=self.connect_timeout
             )
 
-            # Wait for welcome message
             if not self.notification_reader:
                 raise ConnectionError("Reader not available")
             welcome = await asyncio.wait_for(self.notification_reader.read(1024), timeout=5.0)
@@ -281,7 +275,7 @@ class Madvr:
         initial_commands = [
             ["GetMacAddress"],
             ["GetTemperatures"],
-            # get signal info in case a change was missed and its sitting in limbo
+            # Get signal info in case a change was missed
             ["GetIncomingSignalInfo"],
             ["GetOutgoingSignalInfo"],
             ["GetAspectRatio"],
@@ -330,10 +324,10 @@ class Madvr:
 
         try:
             if direct:
-                # Use direct connection (background tasks)
+                # Use bespoke connection
                 response = await self._send_command_direct(cmd)
             else:
-                # Use connection pool (user commands)
+                # Use connection pool
                 response = await self.connection_pool.send_command(cmd)
             return response
         except Exception as e:
@@ -344,12 +338,10 @@ class Madvr:
         """Send a command using a direct connection - no pooling."""
         writer = None
         try:
-            # Create connection with timeout
             deadline = asyncio.get_event_loop().time() + CONNECTION_TIMEOUT
             async with asyncio.timeout_at(deadline):
                 reader, writer = await asyncio.open_connection(self.host, self.port)
 
-            # Wait for welcome message
             deadline = asyncio.get_event_loop().time() + COMMAND_RESPONSE_TIMEOUT
             async with asyncio.timeout_at(deadline):
                 welcome = await reader.read(1024)
@@ -357,11 +349,9 @@ class Madvr:
             if b"WELCOME" not in welcome:
                 raise ConnectionError("Did not receive welcome message")
 
-            # Send command
             writer.write(cmd)
             await writer.drain()
 
-            # Read response
             deadline = asyncio.get_event_loop().time() + COMMAND_RESPONSE_TIMEOUT
             async with asyncio.timeout_at(deadline):
                 response = await reader.read(1024)
@@ -376,6 +366,29 @@ class Madvr:
             if writer:
                 writer.close()
                 await writer.wait_closed()
+
+    async def _send_command_via_notification(self, command: list[str]) -> bool:
+        """
+        Send a command via the notification connection.
+
+        The response will come back as a notification and be processed by the notification task.
+        This is used by background tasks that want their responses processed as notifications.
+
+        Returns True if command was sent successfully.
+        """
+        if not self.notification_writer or not self.notification_connected.is_set():
+            self.logger.debug("Cannot send command via notification - connection not available")
+            return False
+
+        try:
+            cmd, _ = await self._construct_command(command)
+            self.notification_writer.write(cmd)
+            await self.notification_writer.drain()
+            self.logger.debug(f"Sent command via notification connection: {command}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to send command via notification connection: {e}")
+            return False
 
     async def add_command_to_queue(self, command: Iterable[str]) -> None:
         """
@@ -438,7 +451,7 @@ class Madvr:
                     continue
 
             except asyncio.TimeoutError:
-                # Normal - no notifications to read
+                # No notifications to read
                 await asyncio.sleep(TASK_CPU_DELAY)
                 continue
 
@@ -462,7 +475,6 @@ class Madvr:
         """Process notification data in real time."""
         processed_data = await self.notification_processor.process_notifications(msg)
 
-        # Track last activity time
         self.msg_dict["_last_update"] = time.time()
 
         if processed_data.get("power_off"):
@@ -581,10 +593,9 @@ class Madvr:
     async def is_device_connectable(self) -> bool:
         """Check if device is connectable by trying a quick connection."""
         try:
-            # Quick connection test
             deadline = asyncio.get_event_loop().time() + 1.0  # 1 second timeout
             async with asyncio.timeout_at(deadline):
-                reader, writer = await asyncio.open_connection(self.host, self.port)
+                _, writer = await asyncio.open_connection(self.host, self.port)
                 writer.close()
                 await writer.wait_closed()
             return True
@@ -615,7 +626,7 @@ class Madvr:
                     refresh_commands = [
                         ["GetMacAddress"],
                         ["GetTemperatures"],
-                        # get signal info in case a change was missed and its sitting in limbo
+                        # Get signal info in case a change was missed
                         ["GetIncomingSignalInfo"],
                         ["GetOutgoingSignalInfo"],
                         ["GetAspectRatio"],
@@ -624,7 +635,12 @@ class Madvr:
 
                     for command in refresh_commands:
                         try:
-                            await self.send_command(command, direct=True)
+                            # Send via notification connection so responses are processed as notifications
+                            success = await self._send_command_via_notification(command)
+                            if not success:
+                                self.logger.debug(
+                                    f"Failed to send refresh command {command[0]} via notification connection"
+                                )
                         except Exception as e:
                             self.logger.debug(f"Failed to refresh {command[0]}: {e}")
 
@@ -639,8 +655,6 @@ class Madvr:
 
     async def task_ping_device(self) -> None:
         """
-        IMMORTAL TASK: Ping device forever to monitor availability.
-
         This task should not be cancelled during normal operation as it:
         - Determines if the device is on/off
         - Pre-warms the connection pool for faster command execution
@@ -648,7 +662,7 @@ class Madvr:
 
         Only stop this task during complete instance destruction.
         """
-        while True:  # Truly immortal - runs forever
+        while True:
             try:
                 # Try to establish a connection (this is our "ping")
                 is_available = await self.is_device_connectable()
@@ -660,7 +674,6 @@ class Madvr:
                         self.msg_dict["is_on"] = True
                         await self._update_ha_state()
 
-                    # No connection pool prewarming needed
                 else:
                     # Device is off - update state
                     if self.msg_dict.get("is_on", False):
@@ -697,11 +710,10 @@ class Madvr:
                     # Mark task as done regardless of success/failure
                     self.user_command_queue.task_done()
 
-                # Small sleep to prevent CPU spinning when processing rapid commands
+                # Prevent CPU spinning
                 await asyncio.sleep(0.1)
 
             except asyncio.TimeoutError:
-                # Normal - no commands to process
                 continue
             except Exception as e:
                 self.logger.error(f"Error in queue processing task: {e}")
@@ -744,12 +756,12 @@ class Madvr:
                         self.logger.debug("Sent heartbeat to notification connection")
                         last_heartbeat = current_time
 
-                # Sleep for a short time to avoid busy loop
+                # Avoid busy loop
                 await asyncio.sleep(1.0)
 
             except Exception as e:
                 self.logger.error(f"Error sending heartbeat: {e}")
-                # Try to reconnect on next iteration
+                # Clear state for reconnection
                 self.notification_reader = None
                 self.notification_writer = None
                 self.notification_connected.clear()
