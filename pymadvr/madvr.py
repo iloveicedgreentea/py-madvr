@@ -560,32 +560,68 @@ class Madvr:
     ##########################
     # Helper Methods
     ##########################
-    async def _construct_command(self, command: list[str]) -> tuple[bytes, str]:
-        """Construct the command bytes from command list."""
-        if not command:
+    async def _construct_command(self, raw_command: list[str]) -> tuple[bytes, str]:
+        """
+        Transform commands into their byte values from the string value.
+
+        Handles both new format: ["KeyPress", "MENU"]
+        and old format: ["KeyPress, MENU"]
+        """
+        if not raw_command:
             raise NotImplementedError("Empty command")
 
-        command_name = command[0]
+        self.logger.debug("raw_command: %s -- length: %s", raw_command, len(raw_command))
+
+        # Handle comma-separated commands from HA: ["KeyPress, MENU"] -> ["KeyPress", "MENU"]
+        if len(raw_command) == 1 and "," in raw_command[0]:
+            parts = [part.strip() for part in raw_command[0].split(",")]
+            command_name = parts[0]
+            values = parts[1:] if len(parts) > 1 else []
+        elif len(raw_command) > 1:
+            # New format: ["KeyPress", "MENU"]
+            command_name = raw_command[0]
+            values = raw_command[1:]
+        else:
+            # Single command: ["PowerOff"]
+            command_name = raw_command[0]
+            values = []
+
+        self.logger.debug("Parsed command: %s, values: %s", command_name, values)
 
         # Find the command in the Commands enum
         for cmd_enum in Commands:
-            # All command enum values are tuples with bytes as first element
-            if hasattr(cmd_enum.value, "__len__") and len(cmd_enum.value) >= 1:
-                cmd_bytes = cmd_enum.value[0]
-                # Check if this is the command we're looking for
+            if hasattr(cmd_enum.value, "__len__") and len(cmd_enum.value) >= 3:
+                cmd_bytes, val_enum, _ = cmd_enum.value
+
+                # Check if this matches our command name
                 if cmd_bytes.decode("utf-8", errors="ignore").rstrip() == command_name:
-                    # Build full command
+                    # Build the command
                     full_command = cmd_bytes
 
                     # Add parameters if any
-                    if len(command) > 1:
-                        params = " ".join(command[1:])
-                        full_command += b" " + params.encode("utf-8")
+                    for value in values:
+                        if value.isnumeric():
+                            # Numeric parameter
+                            full_command += b" " + value.encode("utf-8")
+                        elif hasattr(val_enum, value) and hasattr(val_enum, '__members__'):
+                            # Enum value (like MENU for KeyPress)
+                            enum_value = getattr(val_enum, value).value
+                            if isinstance(enum_value, bytes):
+                                full_command += b" " + enum_value
+                            else:
+                                full_command += b" " + str(enum_value).encode("utf-8")
+                        else:
+                            # String parameter (wrap in quotes for commands like DisplayMessage)
+                            if command_name in ["DisplayMessage", "DisplayAudioVolume"]:
+                                if not (value.startswith('"') and value.endswith('"')):
+                                    value = f'"{value}"'
+                            full_command += b" " + value.encode("utf-8")
 
                     # Add footer
                     full_command += Footer.footer.value
 
-                    return full_command, str(type(cmd_enum.value[1]))
+                    self.logger.debug("Constructed command: %s", full_command)
+                    return full_command, str(type(val_enum))
 
         raise NotImplementedError(f"Command '{command_name}' not found")
 

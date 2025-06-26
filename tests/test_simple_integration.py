@@ -80,6 +80,41 @@ async def test_display_message():
         await madvr.close_connection()
 
 
+@pytest.mark.asyncio
+async def test_ha_command_formats():
+    """Test Home Assistant command formats that were failing."""
+    host = os.getenv("MADVR_HOST", "192.168.1.100")
+    port = int(os.getenv("MADVR_PORT", "44077"))
+
+    madvr = Madvr(host, port=port)
+
+    try:
+        await madvr.open_connection()
+        await asyncio.sleep(1)
+
+        # Test the exact commands that were failing in HA logs
+        print("Testing HA command formats...")
+
+        # Test KeyPress commands (comma-separated format from HA)
+        await madvr.add_command_to_queue(["KeyPress, MENU"])
+        await asyncio.sleep(2)
+
+        await madvr.add_command_to_queue(["KeyPress, MENU"])  # Close menu
+        await asyncio.sleep(1)
+
+        # Test OpenMenu command
+        await madvr.add_command_to_queue(["OpenMenu, Info"])
+        await asyncio.sleep(2)
+
+        await madvr.add_command_to_queue(["CloseMenu"])
+        await asyncio.sleep(1)
+
+        print("✓ HA command format test passed!")
+
+    finally:
+        await madvr.close_connection()
+
+
 if __name__ == "__main__":
     # Run directly without pytest
     async def main():
@@ -88,6 +123,7 @@ if __name__ == "__main__":
         try:
             await test_basic_connection()
             await test_display_message()
+            await test_ha_command_formats()
         except Exception as e:
             print(f"✗ Test failed: {e}")
             import traceback
