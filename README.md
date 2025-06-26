@@ -4,6 +4,26 @@ This library implements the IP control specification for madVR Envy.
 
 It supports real time notifications and commands asynchronously. It is intended to be used with my official Home Assistant integration ([madvr](https://www.home-assistant.io/integrations/madvr/))
 
+## Installation
+
+```bash
+pip install py-madvr2
+```
+
+## Usage
+
+```python
+from pymadvr.madvr import Madvr
+
+# Create instance
+madvr = Madvr("192.168.1.100")  # Replace with your MadVR IP
+
+# Connect and use
+await madvr.open_connection()
+response = await madvr.send_command(["GetMacAddress"])
+await madvr.close_connection()
+```
+
 ## Connection Architecture
 
 This library uses an efficient connection management system:
@@ -38,6 +58,7 @@ async def demo_display_commands():
     """Demonstrate the new display commands."""
 
     # Initialize MadVR connection
+    from pymadvr.madvr import Madvr
     madvr = Madvr("192.168.1.100")  # Replace with your MadVR IP
 
     try:
