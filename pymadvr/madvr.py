@@ -470,13 +470,13 @@ class Madvr:
     ##########################
     # Device Control Methods
     ##########################
-    async def power_on(self) -> None:
+    async def power_on(self, mac: str = "") -> None:
         """Turn on the device using Wake on LAN."""
         if self.stop_notifications.is_set():
             self.logger.warning("Cannot power on - client is stopped")
             return
 
-        mac = self.mac_address or self.mac
+        mac = self.mac_address or self.mac or mac
         if not mac:
             self.logger.error("No MAC address available for Wake on LAN")
             return
