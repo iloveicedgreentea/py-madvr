@@ -1,95 +1,86 @@
 """
-Implements the MadVR protocol
+Implements the MadVR protocol with connection-per-command architecture
 """
 
 import asyncio
 import logging
-from typing import Any, Coroutine, Final, Iterable
+import time
+from typing import Any, Final, Iterable
 
 from madvr.commands import Commands, Connections, Footer
 from madvr.consts import (
+    COMMAND_RESPONSE_TIMEOUT,
     COMMAND_TIMEOUT,
     CONNECT_TIMEOUT,
+    CONNECTION_TIMEOUT,
     DEFAULT_PORT,
-    HEARTBEAT_INTERVAL,
-    MAX_COMMAND_QUEUE_SIZE,  # Added import
-    PING_DELAY,
+    MAX_COMMAND_QUEUE_SIZE,
     PING_INTERVAL,
-    READ_LIMIT,
     REFRESH_TIME,
-    SMALL_DELAY,
     TASK_CPU_DELAY,
 )
-from madvr.errors import AckError, HeartBeatError
 from madvr.notifications import NotificationProcessor
+from madvr.simple_pool import SimpleConnectionPool
 from madvr.wol import send_magic_packet
 
 
 class Madvr:
-    """MadVR Control"""
+    """MadVR Control with connection-per-command architecture"""
 
-    # pylint: disable=too-many-arguments
     def __init__(
         self,
         host: str,
-        # Can supply a logger object. It can hook into the HA logger
         logger: logging.Logger = logging.getLogger(__name__),
         port: int = DEFAULT_PORT,
-        # if blank, it will request it from the device for WOL
         mac: str = "",
         connect_timeout: int = CONNECT_TIMEOUT,
-        heartbeat_interval: int = HEARTBEAT_INTERVAL,
-        ping_interval: int = PING_INTERVAL,
-        # pass in the hass loop
         loop: asyncio.AbstractEventLoop | None = None,
     ):
         self.host = host
         self.port = port
         self.mac = mac
         self.connect_timeout: int = connect_timeout
-        self.heartbeat_interval: int = heartbeat_interval
-        self.ping_interval: int = ping_interval
         self.logger = logger
 
-        # used to indicate if connection is ready
-        self.connection_event = asyncio.Event()
-        self.stop_heartbeat = asyncio.Event()
+        # Simple connection pool for user commands (background tasks use direct connections)
+        self.connection_pool = SimpleConnectionPool(host, port, logger)
 
-        # command queue to store commands as they come in
-        self.command_queue: asyncio.Queue = asyncio.Queue(maxsize=MAX_COMMAND_QUEUE_SIZE)  # Use maxsize
-        self.stop_commands_flag = asyncio.Event()
+        # Background tasks
+        self.notification_task: asyncio.Task[None] | None = None
+        self.ping_task: asyncio.Task[None] | None = None
+        self.refresh_task: asyncio.Task[None] | None = None
+        self.queue_task: asyncio.Task[None] | None = None
+        self.notification_reader: asyncio.StreamReader | None = None
+        self.notification_writer: asyncio.StreamWriter | None = None
 
-        # background tasks
-        self.tasks: list[asyncio.Task] = []
+        # User command queue for FIFO processing
+        self.user_command_queue: asyncio.Queue[list[str]] = asyncio.Queue(maxsize=MAX_COMMAND_QUEUE_SIZE)
+        self.stop_queue = asyncio.Event()
+
+        # Event to track if notification connection is ready
+        self.notification_connected = asyncio.Event()
+        self.stop_notifications = asyncio.Event()
+
         self.loop = loop
-
-        self.lock = asyncio.Lock()
+        self.command_read_timeout: int = COMMAND_TIMEOUT
 
         # Const values
         self.MADVR_OK: Final = Connections.welcome.value
         self.HEARTBEAT: Final = Connections.heartbeat.value
 
-        # stores all attributes
-        self.msg_dict: dict = {}
+        # Stores all attributes from notifications
+        self.msg_dict: dict[str, Any] = {}
 
-        # Sockets
-        self.reader = None
-        self.writer = None
-
-        self.read_limit: int = READ_LIMIT
-        self.command_read_timeout: int = COMMAND_TIMEOUT
-
-        # self.async_write_ha_state from HA
+        # Callback for HA state updates
         self.update_callback: Any = None
 
         self.notification_processor = NotificationProcessor(self.logger)
         self.powered_off_recently: bool = False
-        self.ping_delay_after_power_off: int = PING_DELAY
-        self._reconnecting: bool = False  # Prevent recursive reconnection
-        self.logger.debug("Running in debug mode")
+
+        self.logger.debug("Initialized connection-per-command MadVR client")
 
     ##########################
-    # Props
+    # Properties
     ##########################
     @property
     def is_on(self) -> bool:
@@ -101,151 +92,334 @@ class Madvr:
         """Return the mac address of the device."""
         return self.msg_dict.get("mac_address", "")
 
+    @property
+    def connected(self) -> bool:
+        """Return true if notification connection is established."""
+        return self.notification_connected.is_set()
+
     def set_update_callback(self, callback: Any) -> None:
         """Function to set the callback for updating HA state"""
         self.update_callback = callback
 
+    ##########################
+    # Task Management
+    ##########################
     async def async_add_tasks(self) -> None:
-        """Add background tasks with error handling."""
+        """Start background tasks."""
         if not self.loop:
             self.loop = asyncio.get_event_loop()
 
-        async def wrapped_task(coro: Coroutine[Any, Any, Any], name: str) -> None:
-            """Wrapper to handle task errors."""
-            try:
-                await coro
-            except asyncio.CancelledError:
-                self.logger.debug("Task %s was cancelled", name)
-            except Exception as e:
-                self.logger.exception("Task %s failed with error: %s", name, e)
-                # If a critical task fails, trigger reconnection
-                if name in ["notifications", "heartbeat"]:
-                    await self._handle_power_off()
+        # Start notification task
+        self.notification_task = self.loop.create_task(self._notification_task_wrapper())
+        self.notification_task.set_name("notifications")
 
-        task_definitions = [
-            (self.task_handle_queue(), "queue"),
-            (self.task_read_notifications(), "notifications"),
-            (self.send_heartbeat(), "heartbeat"),
-            (self.task_ping_until_alive(), "ping"),
-            (self.task_refresh_info(), "refresh"),
-        ]
+        # Start ping task for device monitoring and connection pre-warming
+        self.ping_task = self.loop.create_task(self._ping_task_wrapper())
+        self.ping_task.set_name("ping")
 
-        # start tasks in wrapper
-        for coro, name in task_definitions:
-            task = self.loop.create_task(wrapped_task(coro, name))
-            task.set_name(name)  # Set task name for identification
-            self.tasks.append(task)
+        # Start refresh task for periodic data updates
+        self.refresh_task = self.loop.create_task(self._refresh_task_wrapper())
+        self.refresh_task.set_name("refresh")
+
+        # Start queue processing task for user commands
+        self.queue_task = self.loop.create_task(self._queue_task_wrapper())
+        self.queue_task.set_name("queue")
+
+        self.logger.debug("Started background tasks")
+
+    async def _notification_task_wrapper(self) -> None:
+        """Wrapper for notification task with error handling."""
+        try:
+            await self.task_read_notifications()
+        except asyncio.CancelledError:
+            self.logger.debug("Notification task was cancelled")
+        except Exception as e:
+            self.logger.exception("Notification task failed: %s", e)
+
+    async def _ping_task_wrapper(self) -> None:
+        """Wrapper for ping task with error handling."""
+        try:
+            await self.task_ping_device()
+        except asyncio.CancelledError:
+            self.logger.debug("Ping task was cancelled")
+        except Exception as e:
+            self.logger.exception("Ping task failed: %s", e)
+
+    async def _refresh_task_wrapper(self) -> None:
+        """Wrapper for refresh task with error handling."""
+        try:
+            await self.task_refresh_info()
+        except asyncio.CancelledError:
+            self.logger.debug("Refresh task was cancelled")
+        except Exception as e:
+            self.logger.exception("Refresh task failed: %s", e)
+
+    async def _queue_task_wrapper(self) -> None:
+        """Wrapper for queue task with error handling."""
+        try:
+            await self.task_process_command_queue()
+        except asyncio.CancelledError:
+            self.logger.debug("Queue task was cancelled")
+        except Exception as e:
+            self.logger.exception("Queue task failed: %s", e)
 
     async def async_cancel_tasks(self) -> None:
-        """Cancel all tasks except ping unless final shutdown."""
-        non_ping_tasks = []
+        """Cancel background tasks (except ping which monitors device state)."""
+        self.stop_notifications.set()
+        self.stop_queue.set()
 
-        # Separate ping task from other tasks
-        for task in self.tasks:
-            if task.get_name() == "ping":
-                continue
+        # Cancel notification task
+        if self.notification_task and not self.notification_task.done():
+            self.notification_task.cancel()
+            try:
+                await self.notification_task
+            except asyncio.CancelledError:
+                pass
 
-            non_ping_tasks.append(task)
-            if not task.done():
-                task.cancel()
+        # Cancel queue task
+        if self.queue_task and not self.queue_task.done():
+            self.queue_task.cancel()
+            try:
+                await self.queue_task
+            except asyncio.CancelledError:
+                pass
 
-        # Wait for non-ping tasks to cancel
-        if non_ping_tasks:
-            await asyncio.gather(*non_ping_tasks, return_exceptions=True)
+        # Note: Ping and Refresh tasks are NOT cancelled here - they should run forever
+        # Ping monitors device availability, Refresh updates display info when device is on
 
-        # Clear task list but preserve ping task if not shutting down
-        self.tasks.clear()
+        # Close notification connection
+        if self.notification_writer:
+            try:
+                self.notification_writer.close()
+                await self.notification_writer.wait_closed()
+            except Exception:
+                pass
+
+        self.notification_reader = None
+        self.notification_writer = None
+        self.notification_connected.clear()
+
+        # Close the simple connection pool
+        await self.connection_pool.close_all()
+
+        self.logger.debug("Cancelled notification task and closed connections")
 
     ##########################
-    # Background tasks
+    # Connection Management
     ##########################
-    async def task_handle_queue(self) -> None:
-        """Handle command queue."""
-        while True:
-            await self.connection_event.wait()
-            while (
-                not self.command_queue.empty() and not self.stop_commands_flag.is_set()
-            ):
-                command = await self.command_queue.get()
-                self.logger.debug("sending queue command %s", command)
-                try:
-                    await self.send_command(command)
-                except NotImplementedError as err:
-                    self.logger.warning("Command not implemented: %s", err)
-                except (
-                    ConnectionError,
-                    ConnectionResetError,
-                    BrokenPipeError,
-                    OSError,
-                ) as err:
-                    self.logger.warning(
-                        "Connection error while sending command: %s", err
-                    )
-                    # Put the command back in the queue unless it's a power command
-                    if not any(cmd in ["PowerOff", "Standby"] for cmd in command):
-                        try:
-                            self.command_queue.put_nowait(command)
-                            self.logger.debug(
-                                "Command %s re-queued after connection error.", command
-                            )
-                        except asyncio.QueueFull:
-                            self.logger.warning(
-                                "Command queue full. Cannot re-queue command %s after connection error. Discarding.",
-                                command,
-                            )
-                    await self._handle_power_off()
-                    break  # Exit the inner loop to wait for reconnection
-                except Exception as err:
-                    self.logger.error("Unexpected error when sending command: %s", err)
+    async def open_connection(self) -> None:
+        """Establish notification connection and start tasks."""
+        try:
+            # Establish notification connection
+            self.logger.debug(f"Connecting to MadVR at {self.host}:{self.port} with timeout {self.connect_timeout}s")
+            await self._establish_notification_connection()
 
-            if self.stop_commands_flag.is_set():
-                self.clear_queue()
-                self.logger.debug("Stopped processing commands")
-                break
+            # Get initial device information first
+            self.logger.debug("Fetching initial device information")
+            await self._get_initial_device_info()
 
-            await asyncio.sleep(TASK_CPU_DELAY)
+            # Start all background tasks with refresh task delay fix
+            self.logger.debug("Starting background tasks")
+            await self.async_add_tasks()
 
+            self.logger.info("MadVR connection established successfully")
+
+        except Exception as e:
+            self.logger.error(f"Failed to establish connection: {e}")
+            raise ConnectionError(f"Failed to connect to {self.host}:{self.port}") from e
+
+    async def _establish_notification_connection(self) -> None:
+        """Establish dedicated connection for notifications."""
+        try:
+            self.notification_reader, self.notification_writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.port), timeout=self.connect_timeout
+            )
+
+            # Wait for welcome message
+            if not self.notification_reader:
+                raise ConnectionError("Reader not available")
+            welcome = await asyncio.wait_for(self.notification_reader.read(1024), timeout=5.0)
+
+            if self.MADVR_OK not in welcome:
+                raise ConnectionError("Did not receive welcome message")
+
+            self.notification_connected.set()
+            self.logger.debug("Notification connection established")
+
+        except Exception as e:
+            if self.notification_writer:
+                self.notification_writer.close()
+            raise ConnectionError(f"Failed to establish notification connection: {e}")
+
+    async def _get_initial_device_info(self) -> None:
+        """Get initial device information using command connections."""
+        initial_commands = [
+            ["GetMacAddress"],
+            ["GetTemperatures"],
+            # get signal info in case a change was missed and its sitting in limbo
+            ["GetIncomingSignalInfo"],
+            ["GetOutgoingSignalInfo"],
+            ["GetAspectRatio"],
+            ["GetMaskingRatio"],
+        ]
+
+        for command in initial_commands:
+            try:
+                await self.send_command(command)
+            except Exception as e:
+                self.logger.debug(f"Failed to get initial info with {command}: {e}")
+
+    async def close_connection(self) -> None:
+        """Close all connections."""
+        await self.async_cancel_tasks()
+
+    def stop(self) -> None:
+        """Stop operations."""
+        self.stop_notifications.set()
+
+    ##########################
+    # Command Execution
+    ##########################
+    async def send_command(self, command: list[str], direct: bool = False) -> str | None:
+        """
+        Send a command using connection pool or direct connection.
+
+        Args:
+            command: A list containing the command to send.
+            direct: If True, use direct connection. If False, use connection pool.
+
+        Returns:
+            Response from the device or None
+
+        Raises:
+            NotImplementedError: If the command is not supported.
+            ConnectionError: If there's any connection-related issue.
+        """
+        try:
+            cmd, _ = await self._construct_command(command)
+        except NotImplementedError as err:
+            self.logger.warning("Command not implemented: %s -- %s", command, err)
+            raise
+
+        self.logger.debug("Sending command: %s", cmd)
+
+        try:
+            if direct:
+                # Use direct connection (background tasks)
+                response = await self._send_command_direct(cmd)
+            else:
+                # Use connection pool (user commands)
+                response = await self.connection_pool.send_command(cmd)
+            return response
+        except Exception as e:
+            self.logger.error(f"Failed to send command {command}: {e}")
+            raise
+
+    async def _send_command_direct(self, cmd: bytes) -> str | None:
+        """Send a command using a direct connection - no pooling."""
+        writer = None
+        try:
+            # Create connection with timeout
+            deadline = asyncio.get_event_loop().time() + CONNECTION_TIMEOUT
+            async with asyncio.timeout_at(deadline):
+                reader, writer = await asyncio.open_connection(self.host, self.port)
+
+            # Wait for welcome message
+            deadline = asyncio.get_event_loop().time() + COMMAND_RESPONSE_TIMEOUT
+            async with asyncio.timeout_at(deadline):
+                welcome = await reader.read(1024)
+
+            if b"WELCOME" not in welcome:
+                raise ConnectionError("Did not receive welcome message")
+
+            # Send command
+            writer.write(cmd)
+            await writer.drain()
+
+            # Read response
+            deadline = asyncio.get_event_loop().time() + COMMAND_RESPONSE_TIMEOUT
+            async with asyncio.timeout_at(deadline):
+                response = await reader.read(1024)
+
+            return response.decode("utf-8", errors="ignore").strip() if response else None
+
+        except asyncio.TimeoutError:
+            raise ConnectionError("Timeout sending command")
+        except Exception as e:
+            raise ConnectionError(f"Failed to send command: {e}")
+        finally:
+            if writer:
+                writer.close()
+                await writer.wait_closed()
+
+    async def add_command_to_queue(self, command: Iterable[str]) -> None:
+        """
+        Add user command to queue for FIFO processing.
+
+        User commands (menu navigation, key presses) are queued to preserve ordering.
+        System commands should use send_command() directly for immediate execution.
+        """
+        command_list = list(command)
+        try:
+            self.user_command_queue.put_nowait(command_list)
+            self.logger.debug(f"Added command to queue: {command_list}")
+        except asyncio.QueueFull:
+            self.logger.error(f"Command queue is full, dropping command: {command_list}")
+        except Exception as e:
+            self.logger.error(f"Failed to queue command {command_list}: {e}")
+
+    def clear_queue(self) -> None:
+        """Clear all pending commands from the user command queue."""
+        try:
+            while not self.user_command_queue.empty():
+                self.user_command_queue.get_nowait()
+                self.user_command_queue.task_done()
+            self.logger.debug("Cleared command queue")
+        except Exception as e:
+            self.logger.error(f"Error clearing queue: {e}")
+
+    ##########################
+    # Notification Handling
+    ##########################
     async def task_read_notifications(self) -> None:
         """
-        Read notifications from the server and update attributes.
-        The task maintains connection state and processes notifications continuously.
+        Read notifications from the dedicated notification connection.
         """
-        while True:
-            # Wait for connection to be established
-            await self.connection_event.wait()
-
+        while not self.stop_notifications.is_set():
             try:
-                if not self.reader:
-                    self.logger.warning("Reader not available")
-                    await self._set_connected(False)
+                if not self.notification_reader:
+                    self.logger.warning("Notification reader not available")
                     await asyncio.sleep(TASK_CPU_DELAY)
                     continue
 
                 msg = await asyncio.wait_for(
-                    self.reader.read(self.read_limit),
+                    self.notification_reader.read(1024),
                     timeout=self.command_read_timeout,
                 )
 
-                # An empty message is probably fine
                 if not msg:
-                    self.logger.debug("Empty message received")
+                    self.logger.debug("Empty notification message")
                     continue
 
                 try:
                     await self._process_notifications(msg.decode("utf-8"))
                 except UnicodeDecodeError as e:
-                    self.logger.error("Failed to decode message: %s", e)
+                    self.logger.error("Failed to decode notification: %s", e)
                     continue
 
             except asyncio.TimeoutError:
-                # This is normal - no notifications to read
+                # Normal - no notifications to read
                 await asyncio.sleep(TASK_CPU_DELAY)
                 continue
 
             except (ConnectionResetError, BrokenPipeError) as err:
-                self.logger.error("Connection error in notification task: %s", err)
-                # Connection was reset - mark as disconnected and trigger reconnect after
-                await self._handle_power_off()
+                self.logger.error(f"Notification connection error: {err}")
+                # Try to reconnect notification connection
+                try:
+                    await self._establish_notification_connection()
+                except Exception as e:
+                    self.logger.error(f"Failed to reconnect notifications: {e}")
+                    await asyncio.sleep(5.0)
                 continue
 
             except Exception as e:
@@ -255,569 +429,83 @@ class Madvr:
 
             await asyncio.sleep(TASK_CPU_DELAY)
 
-    async def send_heartbeat(self, once: bool = False) -> None:
-        """
-        Send a heartbeat to keep connection open.
-        Args:
-            once: If True, only send one heartbeat instead of continuous
-        """
-
-        async def perform_heartbeat() -> None:
-            if not self.connected or not self.writer:
-                raise HeartBeatError("Connection not established")
-
-            try:
-                async with self.lock:
-                    if self.writer:
-                        self.writer.write(self.HEARTBEAT)
-                        await self.writer.drain()
-                        self.logger.debug("Heartbeat sent")
-            except (ConnectionError, OSError) as err:
-                raise HeartBeatError(f"Failed to send heartbeat: {err}") from err
-
-        if once:
-            await perform_heartbeat()
-            return
-
-        while not self.stop_heartbeat.is_set():
-            await self.connection_event.wait()
-
-            try:
-                await perform_heartbeat()
-            except HeartBeatError as err:
-                self.logger.error("Heartbeat error: %s", err)
-                await self._handle_power_off()
-                # Don't retry immediately after error
-                await asyncio.sleep(self.heartbeat_interval * 2)
-                continue
-
-            await asyncio.sleep(self.heartbeat_interval)
-
-    async def task_ping_until_alive(self) -> None:
-        """Check if the device is connectable and connect to it on success."""
-        consecutive_failures = 0
-        MAX_FAILURES = 3
-
-        while True:
-            try:
-                # this will induce flapping otherwise
-                if self.powered_off_recently:
-                    self.logger.debug(
-                        "Device was recently powered off, waiting for %s seconds",
-                        self.ping_delay_after_power_off,
-                    )
-                    await asyncio.sleep(self.ping_delay_after_power_off)
-                    # reset the flag
-                    self.powered_off_recently = False
-
-                is_connectable = await self.is_device_connectable()
-
-                if is_connectable:
-                    consecutive_failures = 0  # Reset failure counter on success
-                    # Double-check connectivity after a short delay
-                    await asyncio.sleep(SMALL_DELAY)
-                    is_connectable = await self.is_device_connectable()
-
-                    if is_connectable and not self.connected:
-                        self.logger.debug(
-                            "Device is connectable, attempting to connect"
-                        )
-                        try:
-                            await self.open_connection()
-                        except ConnectionError as err:
-                            self.logger.error(
-                                "Error opening connection after connectivity check: %s",
-                                err,
-                            )
-                            consecutive_failures += 1
-                else:
-                    self.logger.debug(
-                        "Device is not connectable, retrying in %s seconds",
-                        self.ping_interval,
-                    )
-                    # if its not connectable but we are "connected", then the device was turned off
-                    if self.connected:
-                        consecutive_failures += 1
-                        if consecutive_failures >= MAX_FAILURES:
-                            self.logger.warning(
-                                "Multiple consecutive connection failures, forcing reconnect"
-                            )
-                            await self._handle_power_off()
-                            consecutive_failures = 0
-
-                await asyncio.sleep(self.ping_interval)
-
-            except Exception as err:
-                self.logger.exception("Unexpected error in ping task: %s", err)
-                # Don't let errors kill the ping task
-                await asyncio.sleep(self.ping_interval)
-
-    async def task_refresh_info(self) -> None:
-        """Task to refresh some device info every 20s"""
-        while True:
-            # wait until the connection is established
-            await self.connection_event.wait()
-            cmds = [
-                ["GetMacAddress"],
-                ["GetTemperatures"],
-                # get signal info in case a change was missed and its sitting in limbo
-                ["GetIncomingSignalInfo"],
-                ["GetOutgoingSignalInfo"],
-                ["GetAspectRatio"],
-                ["GetMaskingRatio"],
-            ]
-            for cmd in cmds:
-                await self.add_command_to_queue(cmd)
-            await asyncio.sleep(REFRESH_TIME)
-
-    ##########################
-    # Connection
-    ##########################
-
-    async def _set_connected(self, is_connected: bool) -> None:
-        """Set the connection state."""
-        if is_connected:
-            self.connection_event.set()
-            self.msg_dict["is_on"] = True
-        else:
-            self.connection_event.clear()
-            self.msg_dict["is_on"] = False
-        await self._update_ha_state()
-
-    def stop(self) -> None:
-        """Stop reconnecting"""
-        self.logger.info("Setting stop flags for tasks")
-        self.stop_heartbeat.set()
-        self.stop_commands_flag.set()
-
-    async def _write_with_timeout(self, data: bytes) -> None:
-        """Write data to the socket with a timeout."""
-        if not self.connected or not self.writer:
-            raise ConnectionError("Connection not established")
-
-        async def write_and_drain() -> None:
-            if not self.writer:
-                raise ConnectionError("Writer is not initialized")
-            self.writer.write(data)
-            await self.writer.drain()
-
-        try:
-            async with self.lock:
-                await asyncio.wait_for(write_and_drain(), timeout=self.connect_timeout)
-        except TimeoutError:
-            self.logger.error(
-                "Write operation timed out after %s seconds", self.connect_timeout
-            )
-            await self._handle_power_off() # Use consistent error handling
-        except (ConnectionResetError, OSError) as err:
-            self.logger.error("Error writing to socket: %s", err)
-            await self._handle_power_off() # Use consistent error handling
-
-    async def _reconnect(self) -> None:
-        """
-        Initiate a persistent connection to the device.
-
-        Raises AckError, ConnectionError
-        """
-        # Prevent recursive reconnection attempts
-        if self._reconnecting:
-            self.logger.warning("Already attempting to reconnect, skipping")
-            return
-
-        self._reconnecting = True
-        try:
-            # it will not try to connect until ping is successful
-            if await self.is_device_connectable():
-                self.logger.debug("Device is online")
-
-                try:
-                    self.logger.debug("Connecting to Envy: %s:%s", self.host, self.port)
-
-                    # Clear notification processor state before new connection
-                    self.notification_processor.clear_state()
-
-                    # Command client
-                    self.reader, self.writer = await asyncio.wait_for(
-                        asyncio.open_connection(self.host, self.port),  # type: ignore[arg-type]
-                        timeout=5,
-                    )
-                    self.logger.debug("Handshaking")
-                    self.logger.info("Waiting for envy to be available")
-
-                    await asyncio.sleep(SMALL_DELAY)
-                    # unblock heartbeat task
-                    await self._set_connected(True)
-                    self.stop_heartbeat.clear()
-                    # send a heartbeat now
-                    self.logger.debug("Sending heartbeat")
-                    await self.send_heartbeat(once=True)
-
-                    self.logger.info("Connection established")
-                    self.stop_commands_flag.clear()
-
-                except (TimeoutError, HeartBeatError, OSError) as err:
-                    self.logger.error(
-                        "Heartbeat failed. Connection not established %s", err
-                    )
-                    await self._set_connected(False)
-                    raise ConnectionError("Heartbeat failed") from err
-            else:
-                # the device is off
-                self.logger.debug("Device is offline")
-                await self._handle_power_off()
-        finally:
-            self._reconnecting = False
-
-    async def is_device_connectable(self) -> bool:
-        """Check if the device is connectable without ping. The device is only connectable when on."""
-        retry_count = 0
-        # Reduce retry count to prevent resource exhaustion
-        MAX_RETRIES = 3
-
-        while retry_count < MAX_RETRIES:
-            writer = None
-            try:
-                async with asyncio.timeout(SMALL_DELAY):
-                    _, writer = await asyncio.open_connection(self.host, self.port)
-                    return True
-            except (TimeoutError, ConnectionRefusedError, OSError):
-                pass
-            finally:
-                # Ensure writer is always properly closed
-                if writer and not writer.is_closing():
-                    try:
-                        writer.close()
-                        await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
-                    except Exception as e:
-                        self.logger.debug("Error closing test connection: %s", e)
-
-            await asyncio.sleep(SMALL_DELAY)
-            retry_count += 1
-
-        self.logger.debug("Device is not connectable")
-        return False
-
-    async def _clear_attr(self) -> None:
-        """
-        Clear instance attr so HA doesn't report stale values and tells HA to write values to state
-        """
-        # Incoming attrs
-        self.msg_dict = {"is_on": False}  # Clear attributes and set 'is_on' to False
-        if self.update_callback:
-            self.update_callback(self.msg_dict)
-
-    async def close_connection(self) -> None:
-        """Close the connection and clean up state."""
-        self.logger.debug("Closing connection")
-
-        if self.writer:
-            try:
-                # Try to send a graceful goodbye if possible
-                if not self.writer.is_closing():
-                    try:
-                        async with self.lock:
-                            self.writer.write(Connections.bye.value)
-                            await self.writer.drain()
-                    except (ConnectionError, OSError):
-                        pass  # Ignore errors during goodbye
-
-                self.writer.close()
-                try:
-                    await asyncio.wait_for(self.writer.wait_closed(), timeout=2)
-                except asyncio.TimeoutError:
-                    self.logger.warning("Timeout waiting for writer to close")
-
-            except Exception as e:
-                self.logger.error("Error during connection close: %s", e)
-
-        self.writer = None
-        self.reader = None
-        self._reconnecting = False  # Reset reconnection flag
-        self.notification_processor.clear_state()  # Clear notification state
-        await self._set_connected(False)
-        await self._clear_attr()
-        self.logger.debug("Connection closed and state cleared")
-
-    async def open_connection(self) -> None:
-        """Open a connection with rate limiting."""
-        self.logger.debug("Starting open connection")
-
-        # Add rate limiting for connection attempts
-        MAX_RETRIES = 3
-        RETRY_DELAY = 15  # seconds
-
-        for attempt in range(MAX_RETRIES):
-            try:
-                await self._reconnect()
-                self.logger.debug("Connection opened successfully")
-
-                # Refresh initial device state with conservative rate limiting
-                refresh_commands = [
-                    ["GetMacAddress"],  # Get MAC first as it's most important
-                    ["GetIncomingSignalInfo"],
-                    ["GetOutgoingSignalInfo"],
-                ]
-
-                # Add commands with longer delay to prevent overwhelming device on startup
-                for i, cmd in enumerate(refresh_commands):
-                    await self.add_command_to_queue(cmd)
-                    # Stagger the first few commands more aggressively
-                    delay = 0.5 if i == 0 else 0.3
-                    await asyncio.sleep(delay)
-
-                return
-
-            except (AckError, ConnectionError) as err:
-                self.logger.error(
-                    "Error opening connection (attempt %d/%d): %s",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    err,
-                )
-                if attempt < MAX_RETRIES - 1:  # Don't sleep on last attempt
-                    await asyncio.sleep(
-                        min(RETRY_DELAY * 2**attempt, 300)
-                    )  # Exponential backoff capped at 5min
-
-        raise ConnectionError("Failed to open connection after multiple attempts")
-
-    @property
-    def connected(self) -> bool:
-        """Check if the client is connected."""
-        return self.connection_event.is_set()
-
-    ##########################
-    # Commands
-    ##########################
-    async def add_command_to_queue(self, command: Iterable[str]) -> None:
-        """Add a command to the queue"""
-        self.logger.info("Adding command to queue: %s", command)
-        try:
-            self.command_queue.put_nowait(command)
-        except asyncio.QueueFull:
-            self.logger.warning(
-                "Command queue is full. Discarding command: %s", command
-            )
-
-    def clear_queue(self) -> None:
-        """Clear queue while maintaining maxsize."""
-        self.logger.info("Clearing command queue")
-        # Drain existing queue first
-        while not self.command_queue.empty():
-            try:
-                self.command_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-        # Recreate with same maxsize to ensure bounds are maintained
-        self.command_queue = asyncio.Queue(maxsize=MAX_COMMAND_QUEUE_SIZE)
-
-    async def _construct_command(self, raw_command: list[str]) -> tuple[bytes, str]:
-        """
-        Transform commands into their byte values from the string value
-
-        Raises NotImplementedError
-
-        Return:
-            bytes: the value to send in bytes
-            str: the 'msg' field in the Enum used to filter notifications
-        """
-        self.logger.debug(
-            "raw_command: %s -- raw_command length: %s", raw_command, len(raw_command)
-        )
-        skip_val = False
-        # HA seems to always send commands as a list even if you set them as a str
-
-        # This lets you use single cmds or something with val like KEYPRESS
-
-        # If len is 1 like ["keypress,val"], then try to split, otherwise its just one word
-        # sent directly from HA send_command
-        if len(raw_command) == 1:
-            try:
-                # ['key_press, menu'] -> 'key_press', ['menu']
-                # ['activate_profile, SOURCE, 1'] -> 'activate_profile', ['SOURCE', '1']
-                command, *raw_value = raw_command[0].split(",")
-                # remove space
-                values = [val.strip() for val in raw_value]
-                self.logger.debug("using command %s and values %s", command, values)
-            # if valuerror it means theres just one command like PowerOff, so use that directly
-            except ValueError as err:
-                self.logger.debug(err)
-                command = raw_command[0]
-                skip_val = True
-        elif len(raw_command) > 3:
-            raise NotImplementedError(f"Too many values provided {raw_command}")
-        else:
-            # else a command was provided as a proper list ['keypress', 'menu']
-            # raw command will be a list of 2+
-            command, *values = raw_command
-
-        self.logger.debug("checking command %s", command)
-
-        # Check if command is implemented
-        if not hasattr(Commands, command):
-            raise NotImplementedError(f"Command not implemented: {command}")
-        self.logger.debug("Found command")
-        # construct the command with nested Enums
-        command_name, val, _ = Commands[command].value
-
-        # if there is a value to process
-        cmd: bytes = b""
-        if not skip_val:
-            try:
-                # add the base command
-                command_base: bytes = command_name
-
-                # Special handling for commands that accept string parameters
-                if command in ["DisplayMessage", "DisplayAudioVolume"]:
-                    # For DisplayMessage: first param is timeout (numeric), rest is message
-                    # For DisplayAudioVolume: all params before last are numeric, last is unit string
-                    for i, value in enumerate(values):
-                        if command == "DisplayMessage" and i == 0 and value.isnumeric():
-                            # First parameter is timeout
-                            command_base += b" " + value.encode("utf-8")
-                        elif command == "DisplayAudioVolume" and i < len(values) - 1 and value.isnumeric():
-                            # All but last parameter are numeric
-                            command_base += b" " + value.encode("utf-8")
-                        else:
-                            # String parameter - wrap in quotes if not already wrapped
-                            if not (value.startswith('"') and value.endswith('"')):
-                                value = f'"{value}"'
-                            command_base += b" " + value.encode("utf-8")
-                else:
-                    # Original logic for other commands
-                    for value in values:
-                        # if value is a number, use it directly
-                        if value.isnumeric():  # encode 1 for ActivateProfile
-                            command_base += b" " + value.encode("utf-8")
-                        else:
-                            # else use the enum
-                            command_base += b" " + val[value.lstrip(" ")].value
-
-                # Construct command based on required values
-                cmd = command_base + Footer.footer.value
-
-            except KeyError as exc:
-                raise NotImplementedError(
-                    "Incorrect parameter given for command"
-                ) from exc
-        else:
-            cmd = command_name + Footer.footer.value
-
-        self.logger.debug("constructed command: %s", cmd)
-
-        return cmd, val
-
-    async def send_command(self, command: list) -> None:
-        """
-        Send a given command to the MadVR device.
-
-        Args:
-            command: A list containing the command to send.
-
-        Raises:
-            NotImplementedError: If the command is not supported.
-            ConnectionError: If there's any connection-related issue.
-        """
-        try:
-            cmd, enum_type = await self._construct_command(command)
-        except NotImplementedError as err:
-            self.logger.warning("Command not implemented: %s -- %s", command, err)
-            raise
-
-        self.logger.debug("Using values: %s %s", cmd, enum_type)
-
-        try:
-            await self._write_with_timeout(cmd)
-        except (ConnectionResetError, TimeoutError, OSError) as err:
-            self.logger.error("Error writing command to socket: %s", err)
-            raise ConnectionError("Failed to send command") from err
-
     async def _process_notifications(self, msg: str) -> None:
-        """process data in real time"""
+        """Process notification data in real time."""
         processed_data = await self.notification_processor.process_notifications(msg)
+
+        # Track last activity time
+        self.msg_dict["_last_update"] = time.time()
 
         if processed_data.get("power_off"):
             await self._handle_power_off()
 
-        # only update HA if the data has changed
+        # Only update HA if the data has changed
         if processed_data != self.msg_dict:
             self.msg_dict.update(processed_data)
             await self._update_ha_state()
 
     async def _handle_power_off(self) -> None:
-        """Process out of band power off notifications"""
+        """Process power off notifications."""
         self.powered_off_recently = True
-        # this will mark the device as off
         await self._clear_attr()
         self.stop()
-        await self.close_connection()
 
     async def _update_ha_state(self) -> None:
+        """Update Home Assistant state."""
         if self.update_callback is not None:
             try:
-                self.logger.info("Updating HA with %s", self.msg_dict)
-                self.update_callback(self.msg_dict)
-            except Exception as err:  # pylint: disable=broad-except
-                self.logger.error("Error updating HA: %s", err)
+                await self.update_callback()
+            except Exception as e:
+                self.logger.error(f"Failed to update HA state: {e}")
 
-    async def power_on(self, mac: str = "") -> None:
-        """Power on the device with improved state handling."""
+    async def _clear_attr(self) -> None:
+        """Clear device attributes."""
+        for key in list(self.msg_dict.keys()):
+            if key not in ["mac_address"]:  # Keep MAC address
+                del self.msg_dict[key]
 
-        # Reset flags before starting
-        self.stop_commands_flag.clear()
+        self.msg_dict["is_on"] = False
+        await self._update_ha_state()
 
-        # use the detected mac or one that is supplied at init or function call
-        mac_to_use = self.mac_address or self.mac or mac
-        if mac_to_use:
-            self.logger.debug("Turning on with mac %s", mac_to_use)
-            send_magic_packet(mac_to_use, logger=self.logger)
+    ##########################
+    # Device Control Methods
+    ##########################
+    async def power_on(self) -> None:
+        """Turn on the device using Wake on LAN."""
+        if self.stop_notifications.is_set():
+            self.logger.warning("Cannot power on - client is stopped")
+            return
 
-            # Reset the powered_off flag after sending WOL
-            # This allows the ping task to start checking connectivity
-            self.powered_off_recently = False
-        else:
-            self.logger.warning(
-                "No mac provided, no action to take. Implement your own WOL automation"
-            )
+        mac = self.mac_address or self.mac
+        if not mac:
+            self.logger.error("No MAC address available for Wake on LAN")
+            return
+
+        try:
+            send_magic_packet(mac, logger=self.logger)
+            self.logger.debug("Sent Wake on LAN packet")
+        except Exception as e:
+            self.logger.error(f"Failed to send WOL packet: {e}")
 
     async def power_off(self, standby: bool = False) -> None:
-        """Turn off madvr or set to standby with improved state handling."""
-        self.stop()
-        self.powered_off_recently = True
+        """Turn off the device."""
+        command = ["Standby"] if standby else ["PowerOff"]
 
-        if self.connected:
-            try:
-                await self.send_command(["Standby"] if standby else ["PowerOff"])
-                # Give the device a moment to process the command
-                await asyncio.sleep(SMALL_DELAY)
-            except ConnectionError:
-                self.logger.warning(
-                    "Connection error while sending power off command - device might already be off"
-                )
+        try:
+            await self.send_command(command)
+            self.stop()
+            await self.close_connection()
+            self.powered_off_recently = True
+        except Exception as e:
+            self.logger.error(f"Failed to power off device: {e}")
 
-        await self.close_connection()
+    async def display_message(self, duration: int, message: str) -> None:
+        """Display a message on the device."""
+        await self.add_command_to_queue(["DisplayMessage", str(duration), f'"{message}"'])
 
-    async def display_message(self, timeout_seconds: int, message: str) -> None:
-        """Display a message on screen for specified timeout.
-
-        Args:
-            timeout_seconds: Number of seconds to display the message
-            message: Text message to display
-        """
-        command = ["DisplayMessage", str(timeout_seconds), f'"{message}"']
-        await self.add_command_to_queue(command)
-
-    async def display_audio_volume(self, min_value: int, current_value: int, max_value: int, unit: str) -> None:
-        """Display audio volume control GUI.
-
-        Args:
-            min_value: Minimum volume value
-            current_value: Current volume value
-            max_value: Maximum volume value
-            unit: Unit description (e.g. "dB", "%")
-        """
-        command = ["DisplayAudioVolume", str(min_value), str(current_value), str(max_value), f'"{unit}"']
-        await self.add_command_to_queue(command)
+    async def display_audio_volume(self, channel: int, current: int, max_vol: int, unit: str) -> None:
+        """Display audio volume information."""
+        await self.add_command_to_queue(["DisplayAudioVolume", str(channel), str(current), str(max_vol), f'"{unit}"'])
 
     async def display_audio_mute(self) -> None:
         """Display audio mute indicator."""
@@ -826,3 +514,165 @@ class Madvr:
     async def close_audio_mute(self) -> None:
         """Close audio mute indicator."""
         await self.add_command_to_queue(["CloseAudioMute"])
+
+    ##########################
+    # Helper Methods
+    ##########################
+    async def _construct_command(self, command: list[str]) -> tuple[bytes, str]:
+        """Construct the command bytes from command list."""
+        if not command:
+            raise NotImplementedError("Empty command")
+
+        command_name = command[0]
+
+        # Find the command in the Commands enum
+        for cmd_enum in Commands:
+            # All command enum values are tuples with bytes as first element
+            if hasattr(cmd_enum.value, "__len__") and len(cmd_enum.value) >= 1:
+                cmd_bytes = cmd_enum.value[0]
+                # Check if this is the command we're looking for
+                if cmd_bytes.decode("utf-8", errors="ignore").rstrip() == command_name:
+                    # Build full command
+                    full_command = cmd_bytes
+
+                    # Add parameters if any
+                    if len(command) > 1:
+                        params = " ".join(command[1:])
+                        full_command += b" " + params.encode("utf-8")
+
+                    # Add footer
+                    full_command += Footer.footer.value
+
+                    return full_command, str(type(cmd_enum.value[1]))
+
+        raise NotImplementedError(f"Command '{command_name}' not found")
+
+    # Legacy compatibility methods (simplified)
+    async def is_device_connectable(self) -> bool:
+        """Check if device is connectable by trying a quick connection."""
+        try:
+            # Quick connection test
+            deadline = asyncio.get_event_loop().time() + 1.0  # 1 second timeout
+            async with asyncio.timeout_at(deadline):
+                reader, writer = await asyncio.open_connection(self.host, self.port)
+                writer.close()
+                await writer.wait_closed()
+            return True
+        except Exception:
+            return False
+
+    async def _set_connected(self, connected: bool) -> None:
+        """Set connection state (compatibility method)."""
+        if connected:
+            self.notification_connected.set()
+        else:
+            self.notification_connected.clear()
+
+    async def task_refresh_info(self) -> None:
+        """
+        Refresh device information forever when device is on.
+
+        This task runs forever and updates display information when the device is powered on.
+        It automatically pauses when the device is off to save resources.
+        """
+        # Add initial delay to prevent race condition with startup commands
+        await asyncio.sleep(5)
+
+        while True:
+            try:
+                if self.connected and self.msg_dict.get("is_on", False):
+                    # Get current display information
+                    refresh_commands = [
+                        ["GetMacAddress"],
+                        ["GetTemperatures"],
+                        # get signal info in case a change was missed and its sitting in limbo
+                        ["GetIncomingSignalInfo"],
+                        ["GetOutgoingSignalInfo"],
+                        ["GetAspectRatio"],
+                        ["GetMaskingRatio"],
+                    ]
+
+                    for command in refresh_commands:
+                        try:
+                            await self.send_command(command, direct=True)
+                        except Exception as e:
+                            self.logger.debug(f"Failed to refresh {command[0]}: {e}")
+
+                    await asyncio.sleep(REFRESH_TIME)
+                else:
+                    # Device is off or not connected, wait before checking again
+                    await asyncio.sleep(1)
+
+            except Exception as e:
+                self.logger.debug(f"Info refresh failed: {e}")
+                await asyncio.sleep(REFRESH_TIME)
+
+    async def task_ping_device(self) -> None:
+        """
+        IMMORTAL TASK: Ping device forever to monitor availability.
+
+        This task should not be cancelled during normal operation as it:
+        - Determines if the device is on/off
+        - Pre-warms the connection pool for faster command execution
+        - Updates device power state based on connectivity
+
+        Only stop this task during complete instance destruction.
+        """
+        while True:  # Truly immortal - runs forever
+            try:
+                # Try to establish a connection (this is our "ping")
+                is_available = await self.is_device_connectable()
+
+                if is_available:
+                    # Device is on - update state
+                    if not self.msg_dict.get("is_on", False):
+                        self.logger.debug("Device detected as online")
+                        self.msg_dict["is_on"] = True
+                        await self._update_ha_state()
+
+                    # No connection pool prewarming needed
+                else:
+                    # Device is off - update state
+                    if self.msg_dict.get("is_on", False):
+                        self.logger.debug("Device detected as offline")
+                        self.msg_dict["is_on"] = False
+                        await self._update_ha_state()
+
+                # Wait before next ping
+                await asyncio.sleep(PING_INTERVAL)
+
+            except Exception as e:
+                self.logger.error(f"Error in ping task: {e}")
+                await asyncio.sleep(PING_INTERVAL)
+
+    async def task_process_command_queue(self) -> None:
+        """
+        Process user commands from queue in FIFO order.
+
+        This task ensures user interactions (menu navigation, key presses) are
+        executed in the correct order, which is critical for proper operation.
+        """
+        while not self.stop_queue.is_set():
+            try:
+                # Wait for a command with timeout to allow checking stop event
+                command = await asyncio.wait_for(self.user_command_queue.get(), timeout=1.0)
+
+                try:
+                    # Execute the command immediately (no additional queuing)
+                    await self.send_command(command)
+                    self.logger.debug(f"Processed queued command: {command}")
+                except Exception as e:
+                    self.logger.error(f"Failed to execute queued command {command}: {e}")
+                finally:
+                    # Mark task as done regardless of success/failure
+                    self.user_command_queue.task_done()
+
+                # Small sleep to prevent CPU spinning when processing rapid commands
+                await asyncio.sleep(0.1)
+
+            except asyncio.TimeoutError:
+                # Normal - no commands to process
+                continue
+            except Exception as e:
+                self.logger.error(f"Error in queue processing task: {e}")
+                await asyncio.sleep(TASK_CPU_DELAY)

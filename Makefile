@@ -6,7 +6,7 @@ dev_install:
 	pip3 install -r requirements-test.txt
 
 test:
-	pytest -s tests
+	. .venv/bin/activate && pytest -s tests
 
 upload: build
 	twine upload dist/*

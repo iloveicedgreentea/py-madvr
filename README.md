@@ -4,6 +4,16 @@ This library implements the IP control specification for madVR Envy.
 
 It supports real time notifications and commands asynchronously. It is intended to be used with my official Home Assistant integration ([madvr](https://www.home-assistant.io/integrations/madvr/))
 
+## Connection Architecture
+
+This library uses an efficient connection management system:
+
+- **User Commands**: Uses a simple connection pool that keeps connections alive for 10 seconds after last use, automatically extending the timeout when new commands arrive
+- **Background Tasks**: Use direct connections to avoid interference with user commands
+- **Automatic Cleanup**: Idle connections are automatically closed to respect MadVR's 60-second connection limit
+
+This design eliminates connection race conditions and hanging issues while providing optimal performance.
+
 ## Wake On Lan
 
 If the client is initialized without a mac, it will assume you provide your own wake on lan automation. Standby does not respond to pings so you may as well do a full power off. You may also provide a mac when you call the power on function.
@@ -58,3 +68,56 @@ async def demo_display_commands():
     finally:
         await madvr.close_connection()
 ```
+
+## Testing
+
+### Unit Tests
+
+Run unit tests with:
+```bash
+pytest tests/test_MadVR.py -v
+```
+
+### Integration Tests
+
+Integration tests require a real MadVR device on the network. Set these environment variables:
+
+```bash
+# Required for Wake-on-LAN functionality
+export MADVR_MAC=00:11:22:33:44:55  # Your device's MAC address
+
+# Optional (defaults shown)
+export MADVR_HOST=192.168.1.100
+export MADVR_PORT=44077
+```
+
+To get your device's MAC address (device must be on):
+```bash
+python scripts/power_on_device.py --get-mac
+```
+
+To power on the device for testing:
+```bash
+python scripts/power_on_device.py
+```
+
+Run integration tests:
+```bash
+pytest tests/test_simple_integration.py -v
+```
+
+Run connection pool tests:
+```bash
+pytest tests/test_connection_pool.py -v
+```
+
+Integration tests will automatically skip if the device is not available.
+
+### Connection Pool Testing
+
+The connection pool tests verify:
+- Connection reuse and timeout behavior
+- Background task isolation
+- No hanging or race conditions
+
+These tests help ensure the reliability improvements in the connection management system.

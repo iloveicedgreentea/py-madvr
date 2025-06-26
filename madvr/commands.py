@@ -13,7 +13,7 @@ class Connections(Enum):
 
 
 class Footer(Enum):
-    footer = b"\x0D\x0A"
+    footer = b"\x0d\x0a"
 
 
 class Headers(Enum):
@@ -80,11 +80,13 @@ class DisplayAlert(Enum):
 
 class DisplayMessage(Enum):
     """For DisplayMessage command parameters"""
+
     pass
 
 
 class DisplayAudioVolume(Enum):
     """For DisplayAudioVolume command parameters"""
+
     pass
 
 
