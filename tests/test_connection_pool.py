@@ -15,9 +15,14 @@ def madvr_config():
 
 
 @pytest.mark.asyncio
+@pytest.mark.integration
 async def test_connection_pool_timeout(madvr_config):
     """Test connection pool timeout behavior."""
     madvr = Madvr(madvr_config["host"], port=madvr_config["port"])
+
+    # Check if device is available
+    if not await madvr.is_device_connectable():
+        pytest.skip(f"MadVR device not available at {madvr_config['host']}:{madvr_config['port']}")
 
     try:
         await madvr.open_connection()
@@ -45,13 +50,34 @@ async def test_connection_pool_timeout(madvr_config):
         assert response4 is not None
 
     finally:
+        # Properly close connection and cancel all tasks
         await madvr.close_connection()
+
+        # Cancel the immortal tasks that don't get cancelled by close_connection
+        if madvr.ping_task and not madvr.ping_task.done():
+            madvr.ping_task.cancel()
+            try:
+                await madvr.ping_task
+            except asyncio.CancelledError:
+                pass
+
+        if madvr.refresh_task and not madvr.refresh_task.done():
+            madvr.refresh_task.cancel()
+            try:
+                await madvr.refresh_task
+            except asyncio.CancelledError:
+                pass
 
 
 @pytest.mark.asyncio
+@pytest.mark.integration
 async def test_connection_reuse(madvr_config):
     """Test that multiple rapid commands reuse the same connection."""
     madvr = Madvr(madvr_config["host"], port=madvr_config["port"])
+
+    # Check if device is available
+    if not await madvr.is_device_connectable():
+        pytest.skip(f"MadVR device not available at {madvr_config['host']}:{madvr_config['port']}")
 
     try:
         await madvr.open_connection()
@@ -69,12 +95,25 @@ async def test_connection_reuse(madvr_config):
 
     finally:
         await madvr.close_connection()
+        # Cancel immortal tasks
+        for task in [madvr.ping_task, madvr.refresh_task]:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
 
 @pytest.mark.asyncio
+@pytest.mark.integration
 async def test_background_tasks_dont_interfere(madvr_config):
     """Test that background tasks don't interfere with user commands."""
     madvr = Madvr(madvr_config["host"], port=madvr_config["port"])
+
+    # Check if device is available
+    if not await madvr.is_device_connectable():
+        pytest.skip(f"MadVR device not available at {madvr_config['host']}:{madvr_config['port']}")
 
     try:
         await madvr.open_connection()
@@ -93,6 +132,14 @@ async def test_background_tasks_dont_interfere(madvr_config):
 
     finally:
         await madvr.close_connection()
+        # Cancel immortal tasks
+        for task in [madvr.ping_task, madvr.refresh_task]:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
 
 if __name__ == "__main__":

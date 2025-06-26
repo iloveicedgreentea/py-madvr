@@ -74,26 +74,24 @@ async def test_send_command_error(mock_madvr):
 
 @pytest.mark.asyncio
 async def test_open_connection(mock_madvr):
-    # Mock notification connection setup
-    mock_madvr._establish_notification_connection = AsyncMock()
+    # Mock the background tasks setup
     mock_madvr.async_add_tasks = AsyncMock()
     mock_madvr._get_initial_device_info = AsyncMock()
 
     await mock_madvr.open_connection()
 
-    mock_madvr._establish_notification_connection.assert_called_once()
+    # Verify tasks were started and initial info was fetched
     mock_madvr.async_add_tasks.assert_called_once()
     mock_madvr._get_initial_device_info.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_open_connection_error(mock_madvr):
-    mock_madvr._establish_notification_connection = AsyncMock(side_effect=ConnectionError("Test error"))
+    # Mock async_add_tasks to raise an error
+    mock_madvr.async_add_tasks = AsyncMock(side_effect=ConnectionError("Test error"))
 
     with pytest.raises(ConnectionError):
         await mock_madvr.open_connection()
-
-    mock_madvr._establish_notification_connection.assert_called_once()
 
 
 @pytest.mark.asyncio

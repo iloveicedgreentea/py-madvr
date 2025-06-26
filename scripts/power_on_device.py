@@ -13,28 +13,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pymadvr.madvr import Madvr
 from pymadvr.wol import send_magic_packet
-from tests.test_integration import is_device_available
 
 
-async def get_mac_address(host: str, port: int) -> str:
-    """Connect to device and get MAC address if available."""
-    try:
-        madvr = Madvr(host, port=port)
-        await madvr.open_connection()
-
-        # Wait for device info
-        await asyncio.sleep(2.0)
-
-        mac_address = madvr.mac_address
-        await madvr.close_connection()
-
-        return mac_address
-    except Exception as e:
-        logging.error(f"Failed to get MAC address: {e}")
-        return ""
-
-
-async def power_on_device(host: str, port: int, timeout: int = 30) -> bool:
+async def power_on_device(host: str, port: int, timeout: int = 60) -> bool:
     """
     Power on MadVR device using Wake-on-LAN.
 
@@ -47,9 +28,15 @@ async def power_on_device(host: str, port: int, timeout: int = 30) -> bool:
         True if device is powered on successfully
     """
     logger = logging.getLogger(__name__)
+    madvr = Madvr(
+        host=host,
+        port=port,
+        logger=logger,
+        connect_timeout=10,
+    )
 
     # Check if device is already on
-    if is_device_available(host, port):
+    if await madvr.is_device_connectable():
         logger.info(f"Device at {host}:{port} is already on")
         return True
 
@@ -72,7 +59,7 @@ async def power_on_device(host: str, port: int, timeout: int = 30) -> bool:
 
     start_time = time.time()
     while time.time() - start_time < timeout:
-        if is_device_available(host, port):
+        if await madvr.is_device_connectable():
             logger.info(f"Device is now online! (took {int(time.time() - start_time)} seconds)")
 
             # Give device a moment to fully initialize
@@ -94,22 +81,6 @@ async def main():
     # Get configuration from environment
     host = os.getenv("MADVR_HOST", "192.168.1.100")
     port = int(os.getenv("MADVR_PORT", "44077"))
-
-    # Check for --get-mac argument
-    if len(sys.argv) > 1 and sys.argv[1] == "--get-mac":
-        if not is_device_available(host, port):
-            print(f"Device at {host}:{port} is not available")
-            sys.exit(1)
-
-        mac = await get_mac_address(host, port)
-        if mac:
-            print(f"MAC Address: {mac}")
-            print("\nTo use this MAC address:")
-            print(f"  export MADVR_MAC={mac}")
-        else:
-            print("Failed to get MAC address")
-            sys.exit(1)
-        return
 
     # Try to power on device
     success = await power_on_device(host, port)

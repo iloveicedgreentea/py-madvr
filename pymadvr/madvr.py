@@ -47,6 +47,7 @@ class Madvr:
 
         # Background tasks
         self.notification_task: asyncio.Task[None] | None = None
+        self.notification_heartbeat_task: asyncio.Task[None] | None = None
         self.ping_task: asyncio.Task[None] | None = None
         self.refresh_task: asyncio.Task[None] | None = None
         self.queue_task: asyncio.Task[None] | None = None
@@ -113,6 +114,10 @@ class Madvr:
         self.notification_task = self.loop.create_task(self._notification_task_wrapper())
         self.notification_task.set_name("notifications")
 
+        # Start notification heartbeat task
+        self.notification_heartbeat_task = self.loop.create_task(self._notification_heartbeat_wrapper())
+        self.notification_heartbeat_task.set_name("notification_heartbeat")
+
         # Start ping task for device monitoring and connection pre-warming
         self.ping_task = self.loop.create_task(self._ping_task_wrapper())
         self.ping_task.set_name("ping")
@@ -163,6 +168,15 @@ class Madvr:
         except Exception as e:
             self.logger.exception("Queue task failed: %s", e)
 
+    async def _notification_heartbeat_wrapper(self) -> None:
+        """Wrapper for notification heartbeat task with error handling."""
+        try:
+            await self.task_notification_heartbeat()
+        except asyncio.CancelledError:
+            self.logger.debug("Notification heartbeat task was cancelled")
+        except Exception as e:
+            self.logger.exception("Notification heartbeat task failed: %s", e)
+
     async def async_cancel_tasks(self) -> None:
         """Cancel background tasks (except ping which monitors device state)."""
         self.stop_notifications.set()
@@ -173,6 +187,14 @@ class Madvr:
             self.notification_task.cancel()
             try:
                 await self.notification_task
+            except asyncio.CancelledError:
+                pass
+
+        # Cancel notification heartbeat task
+        if self.notification_heartbeat_task and not self.notification_heartbeat_task.done():
+            self.notification_heartbeat_task.cancel()
+            try:
+                await self.notification_heartbeat_task
             except asyncio.CancelledError:
                 pass
 
@@ -208,25 +230,24 @@ class Madvr:
     # Connection Management
     ##########################
     async def open_connection(self) -> None:
-        """Establish notification connection and start tasks."""
+        """Start background tasks. The heartbeat task will handle establishing the notification connection."""
         try:
-            # Establish notification connection
-            self.logger.debug(f"Connecting to MadVR at {self.host}:{self.port} with timeout {self.connect_timeout}s")
-            await self._establish_notification_connection()
-
-            # Get initial device information first
-            self.logger.debug("Fetching initial device information")
-            await self._get_initial_device_info()
-
-            # Start all background tasks with refresh task delay fix
+            # Start all background tasks
             self.logger.debug("Starting background tasks")
             await self.async_add_tasks()
 
-            self.logger.info("MadVR connection established successfully")
+            # Wait a moment for the heartbeat task to establish the connection
+            await asyncio.sleep(0.5)
+
+            # Get initial device information
+            self.logger.debug("Fetching initial device information")
+            await self._get_initial_device_info()
+
+            self.logger.info("MadVR client initialized successfully")
 
         except Exception as e:
-            self.logger.error(f"Failed to establish connection: {e}")
-            raise ConnectionError(f"Failed to connect to {self.host}:{self.port}") from e
+            self.logger.error(f"Failed to initialize MadVR client: {e}")
+            raise ConnectionError(f"Failed to initialize client for {self.host}:{self.port}") from e
 
     async def _establish_notification_connection(self) -> None:
         """Establish dedicated connection for notifications."""
@@ -247,8 +268,12 @@ class Madvr:
             self.logger.debug("Notification connection established")
 
         except Exception as e:
+            # Clean up on failure
             if self.notification_writer:
                 self.notification_writer.close()
+                await self.notification_writer.wait_closed()
+            self.notification_reader = None
+            self.notification_writer = None
             raise ConnectionError(f"Failed to establish notification connection: {e}")
 
     async def _get_initial_device_info(self) -> None:
@@ -386,15 +411,20 @@ class Madvr:
         Read notifications from the dedicated notification connection.
         """
         while not self.stop_notifications.is_set():
+            # Wait for notification connection to be established
+            if not self.notification_connected.is_set():
+                self.logger.debug("Waiting for notification connection to be established...")
+                await asyncio.sleep(1.0)
+                continue
             try:
                 if not self.notification_reader:
-                    self.logger.warning("Notification reader not available")
+                    # Connection lost - heartbeat task will handle reconnection
                     await asyncio.sleep(TASK_CPU_DELAY)
                     continue
 
                 msg = await asyncio.wait_for(
                     self.notification_reader.read(1024),
-                    timeout=self.command_read_timeout,
+                    timeout=COMMAND_RESPONSE_TIMEOUT,
                 )
 
                 if not msg:
@@ -414,12 +444,11 @@ class Madvr:
 
             except (ConnectionResetError, BrokenPipeError) as err:
                 self.logger.error(f"Notification connection error: {err}")
-                # Try to reconnect notification connection
-                try:
-                    await self._establish_notification_connection()
-                except Exception as e:
-                    self.logger.error(f"Failed to reconnect notifications: {e}")
-                    await asyncio.sleep(5.0)
+                # Clear connection state - heartbeat task will handle reconnection
+                self.notification_reader = None
+                self.notification_writer = None
+                self.notification_connected.clear()
+                await asyncio.sleep(TASK_CPU_DELAY)
                 continue
 
             except Exception as e:
@@ -454,7 +483,8 @@ class Madvr:
         """Update Home Assistant state."""
         if self.update_callback is not None:
             try:
-                await self.update_callback()
+                self.logger.debug("Updating HA with %s", self.msg_dict)
+                self.update_callback(self.msg_dict)
             except Exception as e:
                 self.logger.error(f"Failed to update HA state: {e}")
 
@@ -676,3 +706,51 @@ class Madvr:
             except Exception as e:
                 self.logger.error(f"Error in queue processing task: {e}")
                 await asyncio.sleep(TASK_CPU_DELAY)
+
+    async def task_notification_heartbeat(self) -> None:
+        """
+        Send heartbeat to notification connection to keep it alive.
+
+        MadVR closes connections after 60 seconds without activity.
+        Send heartbeat every 30 seconds to ensure connection stays alive.
+        """
+        last_heartbeat = 0.0
+
+        while not self.stop_notifications.is_set():
+            try:
+                # Check if we need to establish/re-establish connection
+                if (
+                    not self.notification_connected.is_set()
+                    or not self.notification_writer
+                    or self.notification_writer.is_closing()
+                ):
+                    self.logger.info("Heartbeat task establishing notification connection...")
+                    try:
+                        await self._establish_notification_connection()
+                        self.logger.info("Notification connection established by heartbeat task")
+                        last_heartbeat = time.time()
+                    except Exception as e:
+                        self.logger.error(f"Failed to establish notification connection: {e}")
+                        await asyncio.sleep(5.0)  # Wait before retry
+                        continue
+
+                # Check if it's time to send heartbeat (every 30 seconds)
+                current_time = time.time()
+                if current_time - last_heartbeat >= 30.0:
+                    # Send heartbeat command
+                    if self.notification_writer:
+                        self.notification_writer.write(self.HEARTBEAT)
+                        await self.notification_writer.drain()
+                        self.logger.debug("Sent heartbeat to notification connection")
+                        last_heartbeat = current_time
+
+                # Sleep for a short time to avoid busy loop
+                await asyncio.sleep(1.0)
+
+            except Exception as e:
+                self.logger.error(f"Error sending heartbeat: {e}")
+                # Try to reconnect on next iteration
+                self.notification_reader = None
+                self.notification_writer = None
+                self.notification_connected.clear()
+                await asyncio.sleep(5.0)  # Wait a bit before retry
