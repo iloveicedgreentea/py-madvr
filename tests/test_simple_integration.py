@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest
 
-from madvr.madvr import Madvr
+from pymadvr.madvr import Madvr
 
 
 @pytest.mark.asyncio

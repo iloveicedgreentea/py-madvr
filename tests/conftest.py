@@ -3,13 +3,13 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
-from madvr.madvr import Madvr
+from pymadvr.madvr import Madvr
 
 
 @pytest.fixture
 def mock_madvr():
-    with patch("madvr.madvr.asyncio.open_connection", new_callable=AsyncMock), patch(
-        "madvr.madvr.Madvr.connected", new_callable=PropertyMock, return_value=True
+    with patch("pymadvr.madvr.asyncio.open_connection", new_callable=AsyncMock), patch(
+        "pymadvr.madvr.Madvr.connected", new_callable=PropertyMock, return_value=True
     ):
         madvr = Madvr("192.168.1.100")
 
@@ -47,7 +47,7 @@ def mock_madvr():
 
 @pytest.fixture
 def mock_send_magic_packet():
-    with patch("madvr.madvr.send_magic_packet") as mock:
+    with patch("pymadvr.madvr.send_magic_packet") as mock:
         yield mock
 
 

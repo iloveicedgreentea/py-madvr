@@ -11,8 +11,8 @@ from pathlib import Path
 # Add parent directory to path to import madvr module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from madvr.madvr import Madvr
-from madvr.wol import send_magic_packet
+from pymadvr.madvr import Madvr
+from pymadvr.wol import send_magic_packet
 from tests.test_integration import is_device_available
 
 

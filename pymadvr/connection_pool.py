@@ -5,8 +5,8 @@ import logging
 import time
 from typing import List, Optional
 
-from madvr.commands import Connections
-from madvr.consts import (
+from pymadvr.commands import Connections
+from pymadvr.consts import (
     COMMAND_RESPONSE_TIMEOUT,
     COMMAND_RETRY_ATTEMPTS,
     CONNECTION_POOL_MAX_SIZE,

@@ -7,8 +7,8 @@ import logging
 import time
 from typing import Any, Final, Iterable
 
-from madvr.commands import Commands, Connections, Footer
-from madvr.consts import (
+from pymadvr.commands import Commands, Connections, Footer
+from pymadvr.consts import (
     COMMAND_RESPONSE_TIMEOUT,
     COMMAND_TIMEOUT,
     CONNECT_TIMEOUT,
@@ -19,9 +19,9 @@ from madvr.consts import (
     REFRESH_TIME,
     TASK_CPU_DELAY,
 )
-from madvr.notifications import NotificationProcessor
-from madvr.simple_pool import SimpleConnectionPool
-from madvr.wol import send_magic_packet
+from pymadvr.notifications import NotificationProcessor
+from pymadvr.simple_pool import SimpleConnectionPool
+from pymadvr.wol import send_magic_packet
 
 
 class Madvr:

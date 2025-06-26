@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from madvr.madvr import Madvr
+from pymadvr.madvr import Madvr
 
 
 @pytest.fixture
