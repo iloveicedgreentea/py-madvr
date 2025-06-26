@@ -1,6 +1,7 @@
 """Implement notification processing for MadVR."""
 
 import logging
+from typing import Any
 
 
 class NotificationProcessor:
@@ -8,15 +9,15 @@ class NotificationProcessor:
 
     def __init__(self, logger: logging.Logger):
         self.logger = logger
-        self.msg_dict: dict = {}
+        self.msg_dict: dict[str, Any] = {}
 
-    async def process_notifications(self, msg: str) -> dict:
+    async def process_notifications(self, msg: str) -> dict[str, Any]:
         """Parse a message and store the attributes and values in a dictionary"""
         self.logger.debug("Processing notifications: %s", msg)
         notifications = msg.strip().split("\r\n")
 
         # Create a fresh dict for this processing to avoid accumulation
-        result_dict = {}
+        result_dict: dict[str, Any] = {}
 
         for notification in notifications:
             # ignore ok

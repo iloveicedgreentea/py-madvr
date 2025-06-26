@@ -1,17 +1,14 @@
 # type: ignore
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from madvr.errors import HeartBeatError
 
 
 @pytest.mark.asyncio
 async def test_init(mock_madvr):
     assert mock_madvr.host == "192.168.1.100"
     assert mock_madvr.port == 44077  # Assuming DEFAULT_PORT is 44077
-    assert isinstance(mock_madvr.command_queue, asyncio.Queue)
+    assert mock_madvr.connection_pool is not None
 
 
 @pytest.mark.asyncio
@@ -46,62 +43,55 @@ async def test_async_add_tasks(mock_madvr):
         mock_task.set_name = MagicMock()
         mock_loop.return_value.create_task = MagicMock(return_value=mock_task)
         await mock_madvr.async_add_tasks()
-        assert len(mock_madvr.tasks) == 5  # Assuming 5 tasks are created
+        assert mock_madvr.notification_task is not None
+        assert mock_madvr.ping_task is not None
+        assert mock_madvr.refresh_task is not None
+        assert mock_madvr.queue_task is not None  # 4 tasks: notifications, ping, refresh, and queue
 
 
 @pytest.mark.asyncio
-async def test_send_heartbeat(mock_madvr):
-    # Set up the writer mock properly
-    mock_writer = MagicMock()
-    mock_writer.write = MagicMock()
-    mock_writer.drain = AsyncMock()
-    mock_madvr.writer = mock_writer
+async def test_send_command(mock_madvr):
+    # Mock connection pool's send_command method
+    mock_madvr.connection_pool.send_command = AsyncMock(return_value="OK")
+    mock_madvr._construct_command = AsyncMock(return_value=(b"TestCommand\r\n", "enum_type"))
 
-    # Create a proper async context manager mock
-    async_lock_mock = AsyncMock()
-    async_lock_mock.__aenter__ = AsyncMock(return_value=None)
-    async_lock_mock.__aexit__ = AsyncMock(return_value=None)
-    mock_madvr.lock = async_lock_mock
+    result = await mock_madvr.send_command(["TestCommand"])
 
-    await mock_madvr.send_heartbeat(once=True)
-    mock_writer.write.assert_called_once_with(mock_madvr.HEARTBEAT)
+    mock_madvr._construct_command.assert_called_once_with(["TestCommand"])
+    mock_madvr.connection_pool.send_command.assert_called_once_with(b"TestCommand\r\n")
+    assert result == "OK"
 
 
 @pytest.mark.asyncio
-async def test_send_heartbeat_error(mock_madvr):
-    # Set up the writer mock to raise an error
-    mock_writer = MagicMock()
-    mock_writer.write = MagicMock()
-    mock_writer.drain = AsyncMock(side_effect=ConnectionError("Test error"))
-    mock_madvr.writer = mock_writer
+async def test_send_command_error(mock_madvr):
+    # Mock connection pool's send_command to raise error
+    mock_madvr.connection_pool.send_command = AsyncMock(side_effect=ConnectionError("Test error"))
+    mock_madvr._construct_command = AsyncMock(return_value=(b"TestCommand\r\n", "enum_type"))
 
-    # Create a proper async context manager mock
-    async_lock_mock = AsyncMock()
-    async_lock_mock.__aenter__ = AsyncMock(return_value=None)
-    async_lock_mock.__aexit__ = AsyncMock(return_value=None)
-    mock_madvr.lock = async_lock_mock
-
-    with pytest.raises(HeartBeatError):
-        await mock_madvr.send_heartbeat(once=True)
+    with pytest.raises(ConnectionError):
+        await mock_madvr.send_command(["TestCommand"])
 
 
 @pytest.mark.asyncio
 async def test_open_connection(mock_madvr):
+    # Mock the background tasks setup
+    mock_madvr.async_add_tasks = AsyncMock()
+    mock_madvr._get_initial_device_info = AsyncMock()
+
     await mock_madvr.open_connection()
 
-    mock_madvr._reconnect.assert_called_once()
-    # Updated to match the new reduced command count (3 instead of 5)
-    assert mock_madvr.add_command_to_queue.call_count == 3
+    # Verify tasks were started and initial info was fetched
+    mock_madvr.async_add_tasks.assert_called_once()
+    mock_madvr._get_initial_device_info.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_open_connection_error(mock_madvr):
-    mock_madvr._reconnect.side_effect = ConnectionError
+    # Mock async_add_tasks to raise an error
+    mock_madvr.async_add_tasks = AsyncMock(side_effect=ConnectionError("Test error"))
 
     with pytest.raises(ConnectionError):
         await mock_madvr.open_connection()
-
-    mock_madvr.add_command_to_queue.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -117,27 +107,27 @@ async def test_power_on(mock_madvr, mock_send_magic_packet):
 
 @pytest.mark.asyncio
 async def test_power_off(mock_madvr):
-    mock_madvr._construct_command.return_value = (b"PowerOff\r", "enum_type")
+    # Mock send_command to avoid actual connection
+    mock_madvr.send_command = AsyncMock()
 
     await mock_madvr.power_off()
 
     mock_madvr.stop.assert_called_once()
     assert mock_madvr.powered_off_recently is True
-    mock_madvr._construct_command.assert_called_once_with(["PowerOff"])
-    mock_madvr._write_with_timeout.assert_called_once_with(b"PowerOff\r")
+    mock_madvr.send_command.assert_called_once_with(["PowerOff"])
     mock_madvr.close_connection.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_power_off_standby(mock_madvr):
-    mock_madvr._construct_command.return_value = (b"Standby\r", "enum_type")
+    # Mock send_command to avoid actual connection
+    mock_madvr.send_command = AsyncMock()
 
     await mock_madvr.power_off(standby=True)
 
     mock_madvr.stop.assert_called_once()
     assert mock_madvr.powered_off_recently is True
-    mock_madvr._construct_command.assert_called_once_with(["Standby"])
-    mock_madvr._write_with_timeout.assert_called_once_with(b"Standby\r")
+    mock_madvr.send_command.assert_called_once_with(["Standby"])
     mock_madvr.close_connection.assert_called_once()
 
 
