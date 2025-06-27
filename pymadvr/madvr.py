@@ -76,7 +76,6 @@ class Madvr:
         self.update_callback: Any = None
 
         self.notification_processor = NotificationProcessor(self.logger)
-        self.powered_off_recently: bool = False
 
     ##########################
     # Properties
@@ -231,8 +230,13 @@ class Madvr:
             self.logger.debug("Starting background tasks")
             await self.async_add_tasks()
 
-            # Wait for heartbeat task to establish connection
-            await asyncio.sleep(0.5)
+            # Wait for notification connection to be established by heartbeat task
+            timeout = 10.0  # Maximum time to wait
+            start_time = asyncio.get_event_loop().time()
+            while not self.notification_connected.is_set():
+                if asyncio.get_event_loop().time() - start_time > timeout:
+                    raise ConnectionError("Timeout waiting for notification connection")
+                await asyncio.sleep(0.1)
 
             # Get initial device information
             self.logger.debug("Fetching initial device information")
@@ -487,7 +491,6 @@ class Madvr:
 
     async def _handle_power_off(self) -> None:
         """Process power off notifications."""
-        self.powered_off_recently = True
         await self._clear_attr()
         self.stop()
 
@@ -514,17 +517,14 @@ class Madvr:
     ##########################
     async def power_on(self, mac: str = "") -> None:
         """Turn on the device using Wake on LAN."""
-        if self.stop_notifications.is_set():
-            self.logger.warning("Cannot power on - client is stopped")
-            return
-
-        mac = self.mac_address or self.mac or mac
-        if not mac:
+        # Use explicitly passed MAC first, then fall back to stored values
+        mac_to_use = mac or self.mac_address or self.mac
+        if not mac_to_use:
             self.logger.error("No MAC address available for Wake on LAN")
             return
 
         try:
-            send_magic_packet(mac, logger=self.logger)
+            send_magic_packet(mac_to_use, logger=self.logger)
             self.logger.debug("Sent Wake on LAN packet")
         except Exception as e:
             self.logger.error(f"Failed to send WOL packet: {e}")
@@ -537,7 +537,6 @@ class Madvr:
             await self.send_command(command)
             self.stop()
             await self.close_connection()
-            self.powered_off_recently = True
         except Exception as e:
             self.logger.error(f"Failed to power off device: {e}")
 
@@ -603,7 +602,7 @@ class Madvr:
                         if value.isnumeric():
                             # Numeric parameter
                             full_command += b" " + value.encode("utf-8")
-                        elif hasattr(val_enum, value) and hasattr(val_enum, '__members__'):
+                        elif hasattr(val_enum, value) and hasattr(val_enum, "__members__"):
                             # Enum value (like MENU for KeyPress)
                             enum_value = getattr(val_enum, value).value
                             if isinstance(enum_value, bytes):
