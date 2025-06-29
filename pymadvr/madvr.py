@@ -768,6 +768,11 @@ class Madvr:
 
         while not self.stop_notifications.is_set():
             try:
+                # Only try to connect if device is on
+                if not self.msg_dict.get("is_on", False):
+                    await asyncio.sleep(1.0)
+                    continue
+
                 # Check if we need to establish/re-establish connection
                 if (
                     not self.notification_connected.is_set()
