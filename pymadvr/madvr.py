@@ -707,6 +707,8 @@ class Madvr:
                     if not self.msg_dict.get("is_on", False):
                         self.logger.debug("Device detected as online")
                         self.msg_dict["is_on"] = True
+                        # Clear stop_notifications flag to allow notification tasks to restart
+                        self.stop_notifications.clear()
                         await self._update_ha_state()
 
                 else:
