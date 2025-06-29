@@ -535,6 +535,7 @@ class Madvr:
 
         try:
             await self.send_command(command)
+            await self._clear_attr()
             self.stop()
             await self.close_connection()
         except Exception as e:
