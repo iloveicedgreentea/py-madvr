@@ -537,7 +537,7 @@ class Madvr:
             await self.send_command(command)
             await self._clear_attr()
             self.stop()
-            await self.close_connection()
+
         except Exception as e:
             self.logger.error(f"Failed to power off device: {e}")
 
@@ -708,8 +708,9 @@ class Madvr:
                     if not self.msg_dict.get("is_on", False):
                         self.logger.debug("Device detected as online")
                         self.msg_dict["is_on"] = True
-                        # Clear stop_notifications flag to allow notification tasks to restart
+                        # Clear stop_notifications flag to allow notification tasks to resume
                         self.stop_notifications.clear()
+                        self.stop_queue.clear()
                         await self._update_ha_state()
 
                 else:
