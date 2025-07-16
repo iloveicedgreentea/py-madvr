@@ -492,7 +492,8 @@ class Madvr:
     async def _handle_power_off(self) -> None:
         """Process power off notifications."""
         await self._clear_attr()
-        self.stop()
+        self.stop_notifications.set()
+        self.stop_queue.set()
 
     async def _update_ha_state(self) -> None:
         """Update Home Assistant state."""
@@ -526,6 +527,9 @@ class Madvr:
         try:
             send_magic_packet(mac_to_use, logger=self.logger)
             self.logger.debug("Sent Wake on LAN packet")
+            # Clear stop flags to ensure tasks can resume when device comes online
+            self.stop_notifications.clear()
+            self.stop_queue.clear()
         except Exception as e:
             self.logger.error(f"Failed to send WOL packet: {e}")
 
@@ -536,7 +540,8 @@ class Madvr:
         try:
             await self.send_command(command)
             await self._clear_attr()
-            self.stop()
+            self.stop_notifications.set()
+            self.stop_queue.set()
 
         except Exception as e:
             self.logger.error(f"Failed to power off device: {e}")
