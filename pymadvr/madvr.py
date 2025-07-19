@@ -56,11 +56,13 @@ class Madvr:
 
         # User command queue for FIFO processing
         self.user_command_queue: asyncio.Queue[list[str]] = asyncio.Queue(maxsize=MAX_COMMAND_QUEUE_SIZE)
-        self.stop_queue = asyncio.Event()
 
         # Event to track if notification connection is ready
         self.notification_connected = asyncio.Event()
-        self.stop_notifications = asyncio.Event()
+        # Event to signal when tasks should stop (device powered off)
+        self.stop_tasks = asyncio.Event()
+        # Lock for connection state synchronization
+        self._connection_lock = asyncio.Lock()
 
         self.loop = loop
         self.command_read_timeout: int = COMMAND_TIMEOUT
@@ -71,6 +73,8 @@ class Madvr:
 
         # Stores all attributes from notifications
         self.msg_dict: dict[str, Any] = {}
+        # Lock for thread-safe access to msg_dict
+        self._msg_dict_lock = asyncio.Lock()
 
         # Callback for HA state updates
         self.update_callback: Any = None
@@ -98,6 +102,45 @@ class Madvr:
     def set_update_callback(self, callback: Any) -> None:
         """Function to set the callback for updating HA state"""
         self.update_callback = callback
+
+    def _should_tasks_sleep(self) -> bool:
+        """Check if tasks should sleep due to device being off or stop signal."""
+        return self.stop_tasks.is_set() or not self.msg_dict.get("is_on", False)
+
+    async def _set_device_power_state(self, is_on: bool, update_ha: bool = True) -> None:
+        """Atomically set device power state and corresponding task flags."""
+        async with self._msg_dict_lock:
+            old_state = self.msg_dict.get("is_on", False)
+            self.msg_dict["is_on"] = is_on
+
+            if is_on:
+                # Device is on - allow tasks to run
+                self.stop_tasks.clear()
+                if old_state != is_on:
+                    self.logger.debug("Device state changed to online")
+            else:
+                # Device is off - make tasks sleep and clear pending commands
+                self.stop_tasks.set()
+                if old_state != is_on:
+                    self.logger.debug("Device state changed to offline")
+                    self.clear_queue()  # Clear stale commands when device goes offline
+
+            if update_ha and old_state != is_on:
+                await self._update_ha_state()
+
+    async def _clear_notification_connection(self) -> None:
+        """Safely clear notification connection state."""
+        async with self._connection_lock:
+            if self.notification_writer:
+                try:
+                    self.notification_writer.close()
+                    await asyncio.wait_for(self.notification_writer.wait_closed(), timeout=2.0)
+                except Exception as e:
+                    self.logger.debug(f"Error closing notification connection: {e}")
+
+            self.notification_reader = None
+            self.notification_writer = None
+            self.notification_connected.clear()
 
     ##########################
     # Task Management
@@ -175,50 +218,37 @@ class Madvr:
             self.logger.exception("Notification heartbeat task failed: %s", e)
 
     async def async_cancel_tasks(self) -> None:
-        """Cancel background tasks (except ping which monitors device state)."""
-        self.stop_notifications.set()
-        self.stop_queue.set()
+        """Cancel all background tasks including ping and refresh tasks."""
+        self.stop_tasks.set()
 
-        # Cancel notification task
-        if self.notification_task and not self.notification_task.done():
-            self.notification_task.cancel()
-            try:
-                await self.notification_task
-            except asyncio.CancelledError:
-                pass
+        # List of all tasks to cancel
+        tasks_to_cancel = [
+            ("notification", self.notification_task),
+            ("notification_heartbeat", self.notification_heartbeat_task),
+            ("queue", self.queue_task),
+            ("ping", self.ping_task),
+            ("refresh", self.refresh_task),
+        ]
 
-        # Cancel notification heartbeat task
-        if self.notification_heartbeat_task and not self.notification_heartbeat_task.done():
-            self.notification_heartbeat_task.cancel()
-            try:
-                await self.notification_heartbeat_task
-            except asyncio.CancelledError:
-                pass
+        # Cancel all tasks
+        for task_name, task in tasks_to_cancel:
+            if task and not task.done():
+                self.logger.debug(f"Cancelling {task_name} task")
+                task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=2.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    self.logger.debug(f"{task_name} task cancelled")
+                except Exception as e:
+                    self.logger.error(f"Error cancelling {task_name} task: {e}")
 
-        # Cancel queue task
-        if self.queue_task and not self.queue_task.done():
-            self.queue_task.cancel()
-            try:
-                await self.queue_task
-            except asyncio.CancelledError:
-                pass
-
-        # Close notification connection
-        if self.notification_writer:
-            try:
-                self.notification_writer.close()
-                await self.notification_writer.wait_closed()
-            except Exception:
-                pass
-
-        self.notification_reader = None
-        self.notification_writer = None
-        self.notification_connected.clear()
+        # Clean up connections safely
+        await self._clear_notification_connection()
 
         # Close the simple connection pool
         await self.connection_pool.close_all()
 
-        self.logger.debug("Cancelled notification task and closed connections")
+        self.logger.debug("Cancelled all tasks and closed connections")
 
     ##########################
     # Connection Management
@@ -250,29 +280,33 @@ class Madvr:
 
     async def _establish_notification_connection(self) -> None:
         """Establish dedicated connection for notifications."""
-        try:
-            self.notification_reader, self.notification_writer = await asyncio.wait_for(
-                asyncio.open_connection(self.host, self.port), timeout=self.connect_timeout
-            )
+        async with self._connection_lock:
+            try:
+                self.notification_reader, self.notification_writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.host, self.port), timeout=self.connect_timeout
+                )
 
-            if not self.notification_reader:
-                raise ConnectionError("Reader not available")
-            welcome = await asyncio.wait_for(self.notification_reader.read(1024), timeout=5.0)
+                if not self.notification_reader:
+                    raise ConnectionError("Reader not available")
+                welcome = await asyncio.wait_for(self.notification_reader.read(1024), timeout=5.0)
 
-            if self.MADVR_OK not in welcome:
-                raise ConnectionError("Did not receive welcome message")
+                if self.MADVR_OK not in welcome:
+                    raise ConnectionError("Did not receive welcome message")
 
-            self.notification_connected.set()
-            self.logger.debug("Notification connection established")
+                self.notification_connected.set()
+                self.logger.debug("Notification connection established")
 
-        except Exception as e:
-            # Clean up on failure
-            if self.notification_writer:
-                self.notification_writer.close()
-                await self.notification_writer.wait_closed()
-            self.notification_reader = None
-            self.notification_writer = None
-            raise ConnectionError(f"Failed to establish notification connection: {e}")
+            except Exception as e:
+                # Clean up on failure with timeout protection
+                if self.notification_writer:
+                    try:
+                        self.notification_writer.close()
+                        await asyncio.wait_for(self.notification_writer.wait_closed(), timeout=2.0)
+                    except Exception:
+                        pass  # Ignore cleanup errors
+                self.notification_reader = None
+                self.notification_writer = None
+                raise ConnectionError(f"Failed to establish notification connection: {e}")
 
     async def _get_initial_device_info(self) -> None:
         """Get initial device information using command connections."""
@@ -298,7 +332,7 @@ class Madvr:
 
     def stop(self) -> None:
         """Stop operations."""
-        self.stop_notifications.set()
+        self.stop_tasks.set()
 
     ##########################
     # Command Execution
@@ -380,19 +414,20 @@ class Madvr:
 
         Returns True if command was sent successfully.
         """
-        if not self.notification_writer or not self.notification_connected.is_set():
-            self.logger.debug("Cannot send command via notification - connection not available")
-            return False
+        async with self._connection_lock:
+            if not self.notification_writer or not self.notification_connected.is_set():
+                self.logger.debug("Cannot send command via notification - connection not available")
+                return False
 
-        try:
-            cmd, _ = await self._construct_command(command)
-            self.notification_writer.write(cmd)
-            await self.notification_writer.drain()
-            self.logger.debug(f"Sent command via notification connection: {command}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to send command via notification connection: {e}")
-            return False
+            try:
+                cmd, _ = await self._construct_command(command)
+                self.notification_writer.write(cmd)
+                await asyncio.wait_for(self.notification_writer.drain(), timeout=2.0)
+                self.logger.debug(f"Sent command via notification connection: {command}")
+                return True
+            except Exception as e:
+                self.logger.error(f"Failed to send command via notification connection: {e}")
+                return False
 
     async def add_command_to_queue(self, command: Iterable[str]) -> None:
         """
@@ -427,7 +462,12 @@ class Madvr:
         """
         Read notifications from the dedicated notification connection.
         """
-        while not self.stop_notifications.is_set():
+        while True:
+            # Sleep when device is off
+            if self._should_tasks_sleep():
+                await asyncio.sleep(1.0)
+                continue
+
             # Wait for notification connection to be established
             if not self.notification_connected.is_set():
                 self.logger.debug("Waiting for notification connection to be established...")
@@ -461,10 +501,8 @@ class Madvr:
 
             except (ConnectionResetError, BrokenPipeError) as err:
                 self.logger.error(f"Notification connection error: {err}")
-                # Clear connection state - heartbeat task will handle reconnection
-                self.notification_reader = None
-                self.notification_writer = None
-                self.notification_connected.clear()
+                # Clear connection state safely - heartbeat task will handle reconnection
+                await self._clear_notification_connection()
                 await asyncio.sleep(TASK_CPU_DELAY)
                 continue
 
@@ -479,21 +517,22 @@ class Madvr:
         """Process notification data in real time."""
         processed_data = await self.notification_processor.process_notifications(msg)
 
-        self.msg_dict["_last_update"] = time.time()
+        async with self._msg_dict_lock:
+            self.msg_dict["_last_update"] = time.time()
 
-        if processed_data.get("power_off"):
-            await self._handle_power_off()
+            if processed_data.get("power_off"):
+                await self._handle_power_off()
+                return  # _handle_power_off already updates HA state
 
-        # Only update HA if the data has changed
-        if processed_data != self.msg_dict:
-            self.msg_dict.update(processed_data)
-            await self._update_ha_state()
+            # Only update HA if the data has changed
+            if processed_data != self.msg_dict:
+                self.msg_dict.update(processed_data)
+                await self._update_ha_state()
 
     async def _handle_power_off(self) -> None:
         """Process power off notifications."""
         await self._clear_attr()
-        self.stop_notifications.set()
-        self.stop_queue.set()
+        await self._set_device_power_state(False)
 
     async def _update_ha_state(self) -> None:
         """Update Home Assistant state."""
@@ -506,12 +545,11 @@ class Madvr:
 
     async def _clear_attr(self) -> None:
         """Clear device attributes."""
-        for key in list(self.msg_dict.keys()):
-            if key not in ["mac_address"]:  # Keep MAC address
-                del self.msg_dict[key]
-
-        self.msg_dict["is_on"] = False
-        await self._update_ha_state()
+        async with self._msg_dict_lock:
+            for key in list(self.msg_dict.keys()):
+                if key not in ["mac_address"]:  # Keep MAC address
+                    del self.msg_dict[key]
+            # Note: is_on will be set by _set_device_power_state
 
     ##########################
     # Device Control Methods
@@ -527,9 +565,8 @@ class Madvr:
         try:
             send_magic_packet(mac_to_use, logger=self.logger)
             self.logger.debug("Sent Wake on LAN packet")
-            # Clear stop flags to ensure tasks can resume when device comes online
-            self.stop_notifications.clear()
-            self.stop_queue.clear()
+            # Clear stop flag to ensure tasks can resume when device comes online
+            self.stop_tasks.clear()
         except Exception as e:
             self.logger.error(f"Failed to send WOL packet: {e}")
 
@@ -540,8 +577,7 @@ class Madvr:
         try:
             await self.send_command(command)
             await self._clear_attr()
-            self.stop_notifications.set()
-            self.stop_queue.set()
+            await self._set_device_power_state(False)
 
         except Exception as e:
             self.logger.error(f"Failed to power off device: {e}")
@@ -662,6 +698,11 @@ class Madvr:
 
         while True:
             try:
+                # Sleep when device is off
+                if self._should_tasks_sleep():
+                    await asyncio.sleep(1)
+                    continue
+
                 if self.connected and self.msg_dict.get("is_on", False):
                     # Get current display information
                     refresh_commands = [
@@ -709,21 +750,14 @@ class Madvr:
                 is_available = await self.is_device_connectable()
 
                 if is_available:
-                    # Device is on - update state
+                    # Device is on - update state atomically
                     if not self.msg_dict.get("is_on", False):
-                        self.logger.debug("Device detected as online")
-                        self.msg_dict["is_on"] = True
-                        # Clear stop_notifications flag to allow notification tasks to resume
-                        self.stop_notifications.clear()
-                        self.stop_queue.clear()
-                        await self._update_ha_state()
+                        await self._set_device_power_state(True)
 
                 else:
-                    # Device is off - update state
+                    # Device is off - update state atomically
                     if self.msg_dict.get("is_on", False):
-                        self.logger.debug("Device detected as offline")
-                        self.msg_dict["is_on"] = False
-                        await self._update_ha_state()
+                        await self._set_device_power_state(False)
 
                 # Wait before next ping
                 await asyncio.sleep(PING_INTERVAL)
@@ -739,7 +773,11 @@ class Madvr:
         This task ensures user interactions (menu navigation, key presses) are
         executed in the correct order, which is critical for proper operation.
         """
-        while not self.stop_queue.is_set():
+        while True:
+            # Sleep when device is off
+            if self._should_tasks_sleep():
+                await asyncio.sleep(1.0)
+                continue
             try:
                 # Wait for a command with timeout to allow checking stop event
                 command = await asyncio.wait_for(self.user_command_queue.get(), timeout=1.0)
@@ -772,19 +810,27 @@ class Madvr:
         """
         last_heartbeat = 0.0
 
-        while not self.stop_notifications.is_set():
+        while True:
             try:
+                # Sleep when device is off
+                if self._should_tasks_sleep():
+                    await asyncio.sleep(1.0)
+                    continue
+
                 # Only try to connect if device is on
                 if not self.msg_dict.get("is_on", False):
                     await asyncio.sleep(1.0)
                     continue
 
                 # Check if we need to establish/re-establish connection
-                if (
-                    not self.notification_connected.is_set()
-                    or not self.notification_writer
-                    or self.notification_writer.is_closing()
-                ):
+                async with self._connection_lock:
+                    needs_connection = (
+                        not self.notification_connected.is_set()
+                        or not self.notification_writer
+                        or self.notification_writer.is_closing()
+                    )
+
+                if needs_connection:
                     self.logger.info("Heartbeat task establishing notification connection...")
                     try:
                         await self._establish_notification_connection()
@@ -798,20 +844,23 @@ class Madvr:
                 # Check if it's time to send heartbeat (every 30 seconds)
                 current_time = time.time()
                 if current_time - last_heartbeat >= 30.0:
-                    # Send heartbeat command
-                    if self.notification_writer:
-                        self.notification_writer.write(self.HEARTBEAT)
-                        await self.notification_writer.drain()
-                        self.logger.debug("Sent heartbeat to notification connection")
-                        last_heartbeat = current_time
+                    # Send heartbeat command with safe access
+                    async with self._connection_lock:
+                        if self.notification_writer and not self.notification_writer.is_closing():
+                            try:
+                                self.notification_writer.write(self.HEARTBEAT)
+                                await asyncio.wait_for(self.notification_writer.drain(), timeout=2.0)
+                                self.logger.debug("Sent heartbeat to notification connection")
+                                last_heartbeat = current_time
+                            except Exception as e:
+                                self.logger.error(f"Failed to send heartbeat: {e}")
+                                raise  # Let outer exception handler deal with cleanup
 
                 # Avoid busy loop
                 await asyncio.sleep(1.0)
 
             except Exception as e:
                 self.logger.error(f"Error sending heartbeat: {e}")
-                # Clear state for reconnection
-                self.notification_reader = None
-                self.notification_writer = None
-                self.notification_connected.clear()
+                # Clear state safely for reconnection
+                await self._clear_notification_connection()
                 await asyncio.sleep(5.0)  # Wait a bit before retry
