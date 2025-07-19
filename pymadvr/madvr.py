@@ -109,6 +109,7 @@ class Madvr:
 
     async def _set_device_power_state(self, is_on: bool, update_ha: bool = True) -> None:
         """Atomically set device power state and corresponding task flags."""
+        should_update_ha = False
         async with self._msg_dict_lock:
             old_state = self.msg_dict.get("is_on", False)
             self.msg_dict["is_on"] = is_on
@@ -125,8 +126,11 @@ class Madvr:
                     self.logger.debug("Device state changed to offline")
                     self.clear_queue()  # Clear stale commands when device goes offline
 
-            if update_ha and old_state != is_on:
-                await self._update_ha_state()
+            should_update_ha = update_ha and old_state != is_on
+
+        # Call callback outside the lock to prevent deadlocks
+        if should_update_ha:
+            await self._update_ha_state()
 
     async def _clear_notification_connection(self) -> None:
         """Safely clear notification connection state."""
@@ -141,6 +145,15 @@ class Madvr:
             self.notification_reader = None
             self.notification_writer = None
             self.notification_connected.clear()
+
+    async def _safe_lock_acquisition(self, lock: asyncio.Lock, timeout: float = 5.0) -> bool:
+        """Safely acquire a lock with timeout protection."""
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            self.logger.error(f"Lock acquisition timed out after {timeout}s")
+            return False
 
     ##########################
     # Task Management
@@ -517,6 +530,7 @@ class Madvr:
         """Process notification data in real time."""
         processed_data = await self.notification_processor.process_notifications(msg)
 
+        should_update_ha = False
         async with self._msg_dict_lock:
             self.msg_dict["_last_update"] = time.time()
 
@@ -527,7 +541,11 @@ class Madvr:
             # Only update HA if the data has changed
             if processed_data != self.msg_dict:
                 self.msg_dict.update(processed_data)
-                await self._update_ha_state()
+                should_update_ha = True
+
+        # Call callback OUTSIDE the lock to prevent deadlocks
+        if should_update_ha:
+            await self._update_ha_state()
 
     async def _handle_power_off(self) -> None:
         """Process power off notifications."""
@@ -861,6 +879,12 @@ class Madvr:
 
             except Exception as e:
                 self.logger.error(f"Error sending heartbeat: {e}")
-                # Clear state safely for reconnection
-                await self._clear_notification_connection()
+                # Clear state safely for reconnection - only if we don't already hold the lock
+                if not self._connection_lock.locked():
+                    await self._clear_notification_connection()
+                else:
+                    # Just clear the connection state, let the lock holder handle cleanup
+                    self.notification_reader = None
+                    self.notification_writer = None
+                    self.notification_connected.clear()
                 await asyncio.sleep(5.0)  # Wait a bit before retry
