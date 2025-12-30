@@ -211,3 +211,38 @@ async def test_handle_power_off_clears_standby_flag(mock_madvr):
     assert mock_madvr._is_standby is False
     mock_madvr._clear_attr.assert_called_once()
     mock_madvr._set_device_power_state.assert_called_once_with(False)
+
+
+@pytest.mark.asyncio
+async def test_power_off_sets_standby_in_msg_dict(mock_madvr):
+    """Test that power_off(standby=True) sets standby in msg_dict for HA coordinator."""
+    mock_madvr.send_command = AsyncMock()
+    mock_madvr._clear_attr = AsyncMock()
+    mock_madvr._set_device_power_state = AsyncMock()
+
+    await mock_madvr.power_off(standby=True)
+
+    assert mock_madvr.msg_dict.get("standby") is True
+
+
+@pytest.mark.asyncio
+async def test_power_off_clears_standby_in_msg_dict(mock_madvr):
+    """Test that regular power_off sets standby=False in msg_dict."""
+    mock_madvr.send_command = AsyncMock()
+    mock_madvr._clear_attr = AsyncMock()
+    mock_madvr._set_device_power_state = AsyncMock()
+    mock_madvr.msg_dict["standby"] = True  # Previously in standby
+
+    await mock_madvr.power_off(standby=False)
+
+    assert mock_madvr.msg_dict.get("standby") is False
+
+
+@pytest.mark.asyncio
+async def test_power_on_clears_standby_in_msg_dict(mock_madvr, mock_send_magic_packet):
+    """Test that power_on clears standby in msg_dict."""
+    mock_madvr.msg_dict = {"mac_address": "00:11:22:33:44:55", "standby": True}
+
+    await mock_madvr.power_on()
+
+    assert mock_madvr.msg_dict.get("standby") is False

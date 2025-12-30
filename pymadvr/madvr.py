@@ -521,6 +521,7 @@ class Madvr:
 
         if processed_data.get("power_off"):
             is_standby = processed_data.get("standby", False)
+            self.msg_dict["standby"] = is_standby  # Add to msg_dict for HA coordinator
             await self._handle_power_off(is_standby=is_standby)
             return
 
@@ -571,6 +572,7 @@ class Madvr:
             self.stop_tasks.clear()
             # Clear standby flag since we're explicitly powering on
             self._is_standby = False
+            self.msg_dict["standby"] = False  # Clear in msg_dict for HA coordinator
         except Exception as e:
             self.logger.error(f"Failed to send WOL packet: {e}")
 
@@ -582,6 +584,7 @@ class Madvr:
             await self.send_command(command)
             # Set standby flag before clearing attributes
             self._is_standby = standby
+            self.msg_dict["standby"] = standby  # Add to msg_dict for HA coordinator
             await self._clear_attr()
             await self._set_device_power_state(False)
 

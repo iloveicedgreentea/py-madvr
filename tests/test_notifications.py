@@ -189,3 +189,37 @@ async def test_clear_state(processor):
     processor.clear_state()
 
     assert processor.msg_dict == {}
+
+
+@pytest.mark.asyncio
+async def test_process_notifications_sets_standby_in_msg_dict():
+    """Test that _process_notifications sets standby in msg_dict for HA coordinator."""
+    from unittest.mock import AsyncMock, patch
+
+    from pymadvr.madvr import Madvr
+
+    with patch("pymadvr.madvr.asyncio.open_connection", new_callable=AsyncMock):
+        madvr = Madvr("192.168.1.100")
+        madvr._handle_power_off = AsyncMock()
+
+        await madvr._process_notifications("Standby\r\n")
+
+        assert madvr.msg_dict.get("standby") is True
+        madvr._handle_power_off.assert_called_once_with(is_standby=True)
+
+
+@pytest.mark.asyncio
+async def test_process_notifications_sets_standby_false_for_poweroff():
+    """Test that _process_notifications sets standby=False for PowerOff notification."""
+    from unittest.mock import AsyncMock, patch
+
+    from pymadvr.madvr import Madvr
+
+    with patch("pymadvr.madvr.asyncio.open_connection", new_callable=AsyncMock):
+        madvr = Madvr("192.168.1.100")
+        madvr._handle_power_off = AsyncMock()
+
+        await madvr._process_notifications("PowerOff\r\n")
+
+        assert madvr.msg_dict.get("standby") is False
+        madvr._handle_power_off.assert_called_once_with(is_standby=False)
