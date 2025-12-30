@@ -1,4 +1,10 @@
-"""Simple integration test - no fixtures, no bullshit."""
+"""Simple integration tests for basic MadVR functionality.
+
+These tests require a real MadVR device.
+Set MADVR_HOST and MADVR_PORT environment variables to run these tests.
+
+For power on/off tests, see test_power_integration.py
+"""
 
 import asyncio
 import os
@@ -14,7 +20,7 @@ import pytest
 from pymadvr.madvr import Madvr
 
 
-def is_device_available():
+def is_device_available() -> bool:
     """Check if MadVR device is reachable."""
     host = os.getenv("MADVR_HOST", "192.168.1.100")
     port = int(os.getenv("MADVR_PORT", "44077"))
@@ -41,11 +47,9 @@ async def test_basic_connection():
     host = os.getenv("MADVR_HOST", "192.168.1.100")
     port = int(os.getenv("MADVR_PORT", "44077"))
 
-    # Create instance
     madvr = Madvr(host, port=port)
 
     try:
-        # Connect
         await madvr.open_connection()
 
         # Wait a bit for data
@@ -140,16 +144,23 @@ async def test_ha_command_formats():
 if __name__ == "__main__":
     # Run directly without pytest
     async def main():
-        print(f"Testing MadVR at {os.getenv('MADVR_HOST', '192.168.1.100')}")
+        host = os.getenv("MADVR_HOST", "192.168.1.100")
+        port = int(os.getenv("MADVR_PORT", "44077"))
+
+        print(f"Testing MadVR at {host}:{port}")
+
+        if not is_device_available():
+            print(f"Device not available at {host}:{port}")
+            return
 
         try:
             await test_basic_connection()
             await test_display_message()
             await test_ha_command_formats()
+            print("\n✓ All basic tests passed!")
         except Exception as e:
             print(f"✗ Test failed: {e}")
             import traceback
-
             traceback.print_exc()
 
     asyncio.run(main())
