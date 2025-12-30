@@ -25,23 +25,30 @@ class NotificationProcessor:
                 continue
 
             parts = notification.split(" ", 1)
-            # ignore empty notifications
-            if len(parts) < 2:
+            title = parts[0]
+            signal_info = parts[1] if len(parts) > 1 else ""
+
+            # Skip truly empty notifications
+            if not title:
                 continue
 
-            title, signal_info = parts
             self.logger.debug("Processing notification Title: %s", title)
 
+            # Handle single-word power/state notifications
             if title == "PowerOff":
                 result_dict["is_on"] = False
                 result_dict["power_off"] = True
-            elif title == "NoSignal":
-                result_dict["is_signal"] = False
             elif title == "Standby":
                 result_dict["is_on"] = False
                 result_dict["power_off"] = True
-            else:
-                # Clear the internal dict before processing new signal info
+                result_dict["standby"] = True  # Distinguish from PowerOff
+            elif title == "NoSignal":
+                result_dict["is_signal"] = False
+            elif title == "ResetTemporary":
+                # Device resets temporary settings - acknowledge but no action needed
+                self.logger.debug("Device reset temporary settings")
+            elif signal_info:
+                # Only process signal info if we have parameters
                 self.msg_dict.clear()
                 self._process_signal_info(title, signal_info.split())
                 # Copy relevant processed data to result

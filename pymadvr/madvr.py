@@ -62,6 +62,9 @@ class Madvr:
         # Event to signal when tasks should stop (device powered off)
         self.stop_tasks = asyncio.Event()
 
+        # Track if device is in standby mode (for HA state reporting)
+        self._is_standby = False
+
         self.loop = loop
         self.command_read_timeout: int = COMMAND_TIMEOUT
 
@@ -94,6 +97,11 @@ class Madvr:
     def connected(self) -> bool:
         """Return true if notification connection is established."""
         return self.notification_connected.is_set()
+
+    @property
+    def is_standby(self) -> bool:
+        """Return true if device is in standby mode."""
+        return self._is_standby
 
     def set_update_callback(self, callback: Any) -> None:
         """Function to set the callback for updating HA state"""
@@ -477,7 +485,9 @@ class Madvr:
                 )
 
                 if not msg:
-                    self.logger.debug("Empty notification message")
+                    self.logger.debug("Empty notification message - connection may be closed")
+                    await self._clear_notification_connection()
+                    await asyncio.sleep(TASK_CPU_DELAY)
                     continue
 
                 try:
@@ -510,7 +520,8 @@ class Madvr:
         processed_data = await self.notification_processor.process_notifications(msg)
 
         if processed_data.get("power_off"):
-            await self._handle_power_off()
+            is_standby = processed_data.get("standby", False)
+            await self._handle_power_off(is_standby=is_standby)
             return
 
         # Only update if the data has actually changed
@@ -519,8 +530,9 @@ class Madvr:
             self.msg_dict.update(processed_data)
             await self._update_ha_state()
 
-    async def _handle_power_off(self) -> None:
-        """Process power off notifications."""
+    async def _handle_power_off(self, is_standby: bool = False) -> None:
+        """Process power off/standby notifications."""
+        self._is_standby = is_standby
         await self._clear_attr()
         await self._set_device_power_state(False)
 
@@ -557,6 +569,8 @@ class Madvr:
             self.logger.debug("Sent Wake on LAN packet")
             # Clear stop flag to ensure tasks can resume when device comes online
             self.stop_tasks.clear()
+            # Clear standby flag since we're explicitly powering on
+            self._is_standby = False
         except Exception as e:
             self.logger.error(f"Failed to send WOL packet: {e}")
 
@@ -566,6 +580,8 @@ class Madvr:
 
         try:
             await self.send_command(command)
+            # Set standby flag before clearing attributes
+            self._is_standby = standby
             await self._clear_attr()
             await self._set_device_power_state(False)
 

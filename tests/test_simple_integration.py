@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import socket
 import sys
 from pathlib import Path
 
@@ -11,6 +12,27 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 
 from pymadvr.madvr import Madvr
+
+
+def is_device_available():
+    """Check if MadVR device is reachable."""
+    host = os.getenv("MADVR_HOST", "192.168.1.100")
+    port = int(os.getenv("MADVR_PORT", "44077"))
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
+
+
+# Skip all tests in this module if device is not available
+pytestmark = pytest.mark.skipif(
+    not is_device_available(),
+    reason="MadVR device not available at MADVR_HOST:MADVR_PORT"
+)
 
 
 @pytest.mark.asyncio
