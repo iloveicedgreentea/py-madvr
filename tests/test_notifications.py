@@ -192,8 +192,8 @@ async def test_clear_state(processor):
 
 
 @pytest.mark.asyncio
-async def test_process_notifications_sets_standby_in_msg_dict():
-    """Test that _process_notifications sets standby in msg_dict for HA coordinator."""
+async def test_process_notifications_calls_handle_power_off_for_standby():
+    """Test that _process_notifications calls _handle_power_off with is_standby=True for Standby notification."""
     from unittest.mock import AsyncMock, patch
 
     from pymadvr.madvr import Madvr
@@ -204,13 +204,13 @@ async def test_process_notifications_sets_standby_in_msg_dict():
 
         await madvr._process_notifications("Standby\r\n")
 
-        assert madvr.msg_dict.get("standby") is True
+        # _handle_power_off is responsible for setting msg_dict["standby"]
         madvr._handle_power_off.assert_called_once_with(is_standby=True)
 
 
 @pytest.mark.asyncio
-async def test_process_notifications_sets_standby_false_for_poweroff():
-    """Test that _process_notifications sets standby=False for PowerOff notification."""
+async def test_process_notifications_calls_handle_power_off_for_poweroff():
+    """Test that _process_notifications calls _handle_power_off with is_standby=False for PowerOff notification."""
     from unittest.mock import AsyncMock, patch
 
     from pymadvr.madvr import Madvr
@@ -221,5 +221,5 @@ async def test_process_notifications_sets_standby_false_for_poweroff():
 
         await madvr._process_notifications("PowerOff\r\n")
 
-        assert madvr.msg_dict.get("standby") is False
+        # _handle_power_off is responsible for setting msg_dict["standby"]
         madvr._handle_power_off.assert_called_once_with(is_standby=False)

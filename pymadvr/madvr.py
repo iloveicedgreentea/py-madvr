@@ -16,6 +16,7 @@ from pymadvr.consts import (
     DEFAULT_PORT,
     MAX_COMMAND_QUEUE_SIZE,
     PING_INTERVAL,
+    POWER_OFF_HYSTERESIS,
     REFRESH_TIME,
     TASK_CPU_DELAY,
 )
@@ -65,6 +66,9 @@ class Madvr:
         # Track if device is in standby mode (for HA state reporting)
         self._is_standby = False
 
+        # Timestamp of last power_off for hysteresis (prevents ping race condition)
+        self._power_off_time: float = 0.0
+
         self.loop = loop
         self.command_read_timeout: int = COMMAND_TIMEOUT
 
@@ -113,22 +117,27 @@ class Madvr:
 
     async def _set_device_power_state(self, is_on: bool, update_ha: bool = True) -> None:
         """Set device power state and corresponding task flags."""
+        # Check if key exists BEFORE getting value - needed to detect post-_clear_attr() state
+        had_is_on_key = "is_on" in self.msg_dict
         old_state = self.msg_dict.get("is_on", False)
         self.msg_dict["is_on"] = is_on
+
+        # Determine if state actually changed (including when key was missing after _clear_attr)
+        state_changed = old_state != is_on or not had_is_on_key
 
         if is_on:
             # Device is on - allow tasks to run
             self.stop_tasks.clear()
-            if old_state != is_on:
+            if state_changed:
                 self.logger.debug("Device state changed to online")
         else:
             # Device is off - make tasks sleep and clear pending commands
             self.stop_tasks.set()
-            if old_state != is_on:
+            if state_changed:
                 self.logger.debug("Device state changed to offline")
                 self.clear_queue()  # Clear stale commands when device goes offline
 
-        if update_ha and old_state != is_on:
+        if update_ha and state_changed:
             await self._update_ha_state()
 
     async def _clear_notification_connection(self) -> None:
@@ -255,15 +264,38 @@ class Madvr:
     ##########################
     # Connection Management
     ##########################
+    def _tasks_running(self) -> bool:
+        """Check if background tasks are already running."""
+        tasks = [
+            self.notification_task,
+            self.notification_heartbeat_task,
+            self.ping_task,
+            self.refresh_task,
+            self.queue_task,
+        ]
+        return any(task is not None and not task.done() for task in tasks)
+
     async def open_connection(self) -> None:
-        """Start background tasks. The heartbeat task will handle establishing the notification connection."""
+        """Start background tasks. The heartbeat task will handle establishing the notification connection.
+
+        If called when tasks are already running (e.g., after device power cycle),
+        this will clear stop_tasks and wait for reconnection instead of starting new tasks.
+        """
         try:
-            # Start all background tasks
-            self.logger.debug("Starting background tasks")
-            await self.async_add_tasks()
+            # Check if tasks are already running (reconnection scenario)
+            if self._tasks_running():
+                self.logger.debug("Tasks already running, triggering reconnection")
+                # Clear stop flag so tasks can resume
+                self.stop_tasks.clear()
+                # Clear hysteresis so ping can detect device immediately
+                self._power_off_time = 0.0
+            else:
+                # Start all background tasks
+                self.logger.debug("Starting background tasks")
+                await self.async_add_tasks()
 
             # Wait for notification connection to be established by heartbeat task
-            timeout = 10.0  # Maximum time to wait
+            timeout = 30.0  # Maximum time to wait (longer for reconnection)
             start_time = asyncio.get_event_loop().time()
             while not self.notification_connected.is_set():
                 if asyncio.get_event_loop().time() - start_time > timeout:
@@ -426,7 +458,11 @@ class Madvr:
             self.logger.debug(f"Sent command via notification connection: {command}")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to send command via notification connection: {e}")
+            # Use debug level if device is off (expected), error level otherwise
+            if self._should_tasks_sleep():
+                self.logger.debug(f"Cannot send via notification (device off): {e}")
+            else:
+                self.logger.error(f"Failed to send command via notification connection: {e}")
             return False
 
     async def add_command_to_queue(self, command: Iterable[str]) -> None:
@@ -521,7 +557,6 @@ class Madvr:
 
         if processed_data.get("power_off"):
             is_standby = processed_data.get("standby", False)
-            self.msg_dict["standby"] = is_standby  # Add to msg_dict for HA coordinator
             await self._handle_power_off(is_standby=is_standby)
             return
 
@@ -534,7 +569,12 @@ class Madvr:
     async def _handle_power_off(self, is_standby: bool = False) -> None:
         """Process power off/standby notifications."""
         self._is_standby = is_standby
+        self._power_off_time = time.time()  # Record for hysteresis
+        # Clear connections immediately to prevent errors from background tasks
+        await self._clear_notification_connection()
+        await self.connection_pool.close_all()
         await self._clear_attr()
+        self.msg_dict["standby"] = is_standby  # Set AFTER _clear_attr()
         await self._set_device_power_state(False)
 
     async def _update_ha_state(self) -> None:
@@ -573,6 +613,8 @@ class Madvr:
             # Clear standby flag since we're explicitly powering on
             self._is_standby = False
             self.msg_dict["standby"] = False  # Clear in msg_dict for HA coordinator
+            # Clear hysteresis so ping can immediately detect device coming online
+            self._power_off_time = 0.0
         except Exception as e:
             self.logger.error(f"Failed to send WOL packet: {e}")
 
@@ -582,12 +624,7 @@ class Madvr:
 
         try:
             await self.send_command(command)
-            # Set standby flag before clearing attributes
-            self._is_standby = standby
-            self.msg_dict["standby"] = standby  # Add to msg_dict for HA coordinator
-            await self._clear_attr()
-            await self._set_device_power_state(False)
-
+            await self._handle_power_off(is_standby=standby)
         except Exception as e:
             self.logger.error(f"Failed to power off device: {e}")
 
@@ -752,6 +789,11 @@ class Madvr:
         - Updates device power state based on connectivity
 
         Only stop this task during complete instance destruction.
+
+        Note: Uses time-based hysteresis after power_off to prevent race conditions
+        where ping sees device briefly still connectable during shutdown.
+        After POWER_OFF_HYSTERESIS seconds, ping can mark device online again
+        (e.g., if turned on manually/out-of-band).
         """
         while True:
             try:
@@ -759,12 +801,22 @@ class Madvr:
                 is_available = await self.is_device_connectable()
 
                 if is_available:
-                    # Device is on - update state atomically
+                    # Device is connectable - but check hysteresis before marking online
                     if not self.msg_dict.get("is_on", False):
-                        await self._set_device_power_state(True)
+                        # Check if we're within hysteresis window after power_off
+                        time_since_power_off = time.time() - self._power_off_time
+                        if time_since_power_off > POWER_OFF_HYSTERESIS:
+                            # Hysteresis window has passed, safe to mark online
+                            await self._set_device_power_state(True)
+                        else:
+                            self.logger.debug(
+                                f"Within hysteresis window ({time_since_power_off:.1f}s < {POWER_OFF_HYSTERESIS}s), "
+                                "not marking device online yet"
+                            )
 
                 else:
                     # Device is off - update state atomically
+                    # Always allow transition to offline
                     if self.msg_dict.get("is_on", False):
                         await self._set_device_power_state(False)
 

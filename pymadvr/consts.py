@@ -19,3 +19,7 @@ HEARTBEAT_TIMEOUT = 0.5
 CONNECTION_TIMEOUT = 1  # 1 second for establishing TCP connection
 COMMAND_RETRY_ATTEMPTS = 2  # Number of attempts to send a command (1 initial + 1 retry)
 CONNECTION_POOL_MAX_SIZE = 5  # Maximum number of connections to keep in pool
+
+# Power off hysteresis - time window after power_off during which ping won't mark device online
+# This prevents race condition where device is briefly still connectable during shutdown
+POWER_OFF_HYSTERESIS = 60.0  # seconds
