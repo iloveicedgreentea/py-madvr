@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="py_madvr2",
-    version="1.9.1",
+    version="2.0.0b1",
     author="iloveicedgreentea2",
     description="A package to control MadVR Envy over IP",
     long_description=long_description,
@@ -13,7 +13,9 @@ setuptools.setup(
     url="https://github.com/iloveicedgreentea/py-madvr",
     packages=setuptools.find_packages(exclude=["tests", "tests.*"]),
     package_data={"pymadvr": ["py.typed"]},
+    python_requires=">=3.11",
     classifiers=[
+        "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",

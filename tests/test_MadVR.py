@@ -41,12 +41,20 @@ async def test_async_add_tasks(mock_madvr):
     with patch("asyncio.get_event_loop") as mock_loop:
         mock_task = MagicMock()
         mock_task.set_name = MagicMock()
-        mock_loop.return_value.create_task = MagicMock(return_value=mock_task)
+
+        def consume_coroutine(coroutine):
+            """Mirror create_task ownership without running background loops."""
+            coroutine.close()
+            return mock_task
+
+        mock_loop.return_value.create_task = MagicMock(side_effect=consume_coroutine)
         await mock_madvr.async_add_tasks()
         assert mock_madvr.notification_task is not None
+        assert mock_madvr.notification_heartbeat_task is not None
         assert mock_madvr.ping_task is not None
         assert mock_madvr.refresh_task is not None
-        assert mock_madvr.queue_task is not None  # 4 tasks: notifications, ping, refresh, and queue
+        assert mock_madvr.queue_task is not None
+        assert mock_loop.return_value.create_task.call_count == 5
 
 
 @pytest.mark.asyncio
@@ -142,13 +150,39 @@ async def test_power_off_standby(mock_madvr):
 @pytest.mark.asyncio
 async def test_display_message(mock_madvr):
     await mock_madvr.display_message(5, "Test message")
-    mock_madvr.add_command_to_queue.assert_called_once_with(["DisplayMessage", "5", '"Test message"'])
+    mock_madvr.add_command_to_queue.assert_called_once_with(["DisplayMessage", "5", "Test message"])
 
 
 @pytest.mark.asyncio
 async def test_display_audio_volume(mock_madvr):
     await mock_madvr.display_audio_volume(0, 50, 100, "%")
-    mock_madvr.add_command_to_queue.assert_called_once_with(["DisplayAudioVolume", "0", "50", "100", '"%"'])
+    mock_madvr.add_command_to_queue.assert_called_once_with(["DisplayAudioVolume", "0", "50", "100", "%"])
+
+
+@pytest.mark.asyncio
+async def test_remote_key_helpers(mock_madvr):
+    await mock_madvr.press_key("up")
+    mock_madvr.add_command_to_queue.assert_awaited_once_with(["KeyPress", "UP"])
+
+    mock_madvr.add_command_to_queue.reset_mock()
+    await mock_madvr.hold_key("left")
+    mock_madvr.add_command_to_queue.assert_awaited_once_with(["KeyHold", "LEFT"])
+
+
+@pytest.mark.asyncio
+async def test_remote_key_helper_rejects_unknown_key(mock_madvr):
+    with pytest.raises(ValueError, match="Unsupported remote key"):
+        await mock_madvr.press_key("BACK")
+
+
+@pytest.mark.asyncio
+async def test_aspect_ratio_and_option_helpers(mock_madvr):
+    await mock_madvr.set_aspect_ratio_mode("auto")
+    mock_madvr.add_command_to_queue.assert_awaited_once_with(["SetAspectRatioMode", "Auto"])
+
+    mock_madvr.send_command = AsyncMock(return_value="OK")
+    assert await mock_madvr.change_option(r"temporary\hdrNits", True) == "OK"
+    mock_madvr.send_command.assert_awaited_once_with(["ChangeOption", r"temporary\hdrNits", "YES"])
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Any, Final, Iterable
 
-from pymadvr.commands import Commands, Connections, Footer
+from pymadvr.commands import AspectRatioMode, Commands, Connections, Footer, KeyPress, Menus, Toggle
 from pymadvr.consts import (
     COMMAND_RESPONSE_TIMEOUT,
     COMMAND_TIMEOUT,
@@ -23,6 +23,53 @@ from pymadvr.consts import (
 from pymadvr.notifications import NotificationProcessor
 from pymadvr.simple_pool import SimpleConnectionPool
 from pymadvr.wol import send_magic_packet
+
+_QUOTED_PARAMETERS = {
+    "CreateProfile": {1},
+    "CreateProfileGroup": {0},
+    "DisplayAlertWindow": {0},
+    "DisplayAudioVolume": {3},
+    "DisplayMessage": {1},
+    "RenameProfile": {2},
+    "RenameProfileGroup": {1},
+}
+_ENUMERATION_TERMINATORS = {
+    b"EnumProfileGroups": b"ProfileGroup.",
+    b"EnumProfiles": b"Profile.",
+    b"EnumOptions": b"Option.",
+    b"EnumSettingPages": b"SettingPage.",
+    b"EnumConfigPages": b"ConfigPage.",
+}
+_MAX_ENUMERATION_BYTES = 1024 * 1024
+
+
+async def _read_enumeration_response(reader: asyncio.StreamReader, terminator: bytes) -> str:
+    """Read enumeration rows while ignoring interleaved acknowledgements/notifications."""
+    prefix = terminator[:-1] + b" "
+    rows = []
+    line = bytearray()
+    size = 0
+    async with asyncio.timeout(COMMAND_RESPONSE_TIMEOUT):
+        while True:
+            character = await reader.read(1)
+            if not character:
+                raise ConnectionError("Enumeration ended before its terminator")
+            size += 1
+            if size > _MAX_ENUMERATION_BYTES:
+                raise ConnectionError("Enumeration response exceeds 1 MiB")
+            if character not in (b"\r", b"\n"):
+                line.extend(character)
+                continue
+
+            value = bytes(line).strip()
+            line.clear()
+            if value == b"ERROR" or value.startswith(b"ERROR "):
+                return value.decode("utf-8", errors="replace")
+            if value == terminator:
+                rows.append(value)
+                return b"\n".join(rows).decode("utf-8", errors="replace")
+            if value.startswith(prefix):
+                rows.append(value)
 
 
 class Madvr:
@@ -376,7 +423,7 @@ class Madvr:
 
         Args:
             command: A list containing the command to send.
-            direct: If True, use direct connection. If False, use connection pool.
+            direct: If True, use a direct connection. Enumerations always use one.
 
         Returns:
             Response from the device or None
@@ -394,8 +441,8 @@ class Madvr:
         self.logger.debug("Sending command: %s", cmd)
 
         try:
-            if direct:
-                # Use bespoke connection
+            if direct or cmd.split(maxsplit=1)[0] in _ENUMERATION_TERMINATORS:
+                # Enumeration replies can span many reads; isolate their trailing notifications.
                 response = await self._send_command_direct(cmd)
             else:
                 # Use connection pool
@@ -408,6 +455,7 @@ class Madvr:
     async def _send_command_direct(self, cmd: bytes) -> str | None:
         """Send a command using a direct connection - no pooling."""
         writer = None
+        terminator = _ENUMERATION_TERMINATORS.get(cmd.split(maxsplit=1)[0])
         try:
             deadline = asyncio.get_event_loop().time() + CONNECTION_TIMEOUT
             async with asyncio.timeout_at(deadline):
@@ -415,13 +463,27 @@ class Madvr:
 
             deadline = asyncio.get_event_loop().time() + COMMAND_RESPONSE_TIMEOUT
             async with asyncio.timeout_at(deadline):
-                welcome = await reader.read(1024)
+                if terminator is None:
+                    welcome = await reader.read(1024)
+                else:
+                    welcome_buffer = bytearray()
+                    while True:
+                        character = await reader.read(1)
+                        if not character or character in (b"\r", b"\n"):
+                            break
+                        welcome_buffer.extend(character)
+                        if len(welcome_buffer) > _MAX_ENUMERATION_BYTES:
+                            raise ConnectionError("Welcome message exceeds 1 MiB")
+                    welcome = bytes(welcome_buffer)
 
             if b"WELCOME" not in welcome:
                 raise ConnectionError("Did not receive welcome message")
 
             writer.write(cmd)
             await writer.drain()
+
+            if terminator is not None:
+                return await _read_enumeration_response(reader, terminator)
 
             deadline = asyncio.get_event_loop().time() + COMMAND_RESPONSE_TIMEOUT
             async with asyncio.timeout_at(deadline):
@@ -630,11 +692,15 @@ class Madvr:
 
     async def display_message(self, duration: int, message: str) -> None:
         """Display a message on the device."""
-        await self.add_command_to_queue(["DisplayMessage", str(duration), f'"{message}"'])
+        if duration < 0:
+            raise ValueError("duration must be zero or greater")
+        await self.add_command_to_queue(["DisplayMessage", str(duration), message])
 
     async def display_audio_volume(self, channel: int, current: int, max_vol: int, unit: str) -> None:
         """Display audio volume information."""
-        await self.add_command_to_queue(["DisplayAudioVolume", str(channel), str(current), str(max_vol), f'"{unit}"'])
+        if max_vol < channel or not channel <= current <= max_vol:
+            raise ValueError("volume values must satisfy min <= current <= max")
+        await self.add_command_to_queue(["DisplayAudioVolume", str(channel), str(current), str(max_vol), unit])
 
     async def display_audio_mute(self) -> None:
         """Display audio mute indicator."""
@@ -644,73 +710,141 @@ class Madvr:
         """Close audio mute indicator."""
         await self.add_command_to_queue(["CloseAudioMute"])
 
+    async def send_key(self, key: str, *, hold: bool = False) -> None:
+        """Queue a supported Envy remote key press or hold event."""
+        normalized_key = key.strip().upper()
+        if normalized_key not in KeyPress.__members__:
+            raise ValueError(f"Unsupported remote key: {key}")
+        await self.add_command_to_queue(["KeyHold" if hold else "KeyPress", normalized_key])
+
+    async def press_key(self, key: str) -> None:
+        """Queue a short remote key press."""
+        await self.send_key(key)
+
+    async def hold_key(self, key: str) -> None:
+        """Queue the Envy protocol's long remote key event."""
+        await self.send_key(key, hold=True)
+
+    async def open_menu(self, menu_or_page: str) -> None:
+        """Open a built-in menu or a settings/configuration page ID."""
+        value = menu_or_page.strip()
+        if not value:
+            raise ValueError("menu_or_page must not be empty")
+        built_in_menus = {member.name.casefold(): member.name for member in Menus}
+        await self.add_command_to_queue(["OpenMenu", built_in_menus.get(value.casefold(), value)])
+
+    async def close_menu(self) -> None:
+        """Close the Envy menu."""
+        await self.add_command_to_queue(["CloseMenu"])
+
+    async def display_alert(self, message: str) -> None:
+        """Display a persistent alert window."""
+        if not message:
+            raise ValueError("message must not be empty")
+        await self.add_command_to_queue(["DisplayAlertWindow", message])
+
+    async def close_alert(self) -> None:
+        """Close a persistent alert window."""
+        await self.add_command_to_queue(["CloseAlertWindow"])
+
+    async def set_aspect_ratio_mode(self, mode: str) -> None:
+        """Set the temporary aspect-ratio mode or documented fixed ratio."""
+        normalized_modes = {
+            member.value.decode("ascii").casefold(): member.value.decode("ascii")
+            for member in AspectRatioMode
+        }
+        try:
+            normalized_mode = normalized_modes[mode.strip().casefold()]
+        except KeyError as err:
+            raise ValueError(f"Unsupported aspect-ratio mode: {mode}") from err
+        await self.add_command_to_queue(["SetAspectRatioMode", normalized_mode])
+
+    async def activate_profile(self, profile_group: str, profile_id: int | str) -> None:
+        """Activate a source, display, or custom-group profile."""
+        group = profile_group.strip()
+        if not group:
+            raise ValueError("profile_group must not be empty")
+        if group.casefold() in {"source", "display"}:
+            group = group.upper()
+        await self.add_command_to_queue(["ActivateProfile", group, str(profile_id)])
+
+    async def query_option(self, option_path: str) -> str | None:
+        """Query an Envy option by ID or detailed path."""
+        return await self.send_command(["QueryOption", option_path])
+
+    async def change_option(self, option_path: str, value: str | int | bool) -> str | None:
+        """Change an Envy option by ID or detailed path."""
+        if isinstance(value, bool):
+            protocol_value = "YES" if value else "NO"
+        else:
+            protocol_value = str(value)
+        return await self.send_command(["ChangeOption", option_path, protocol_value])
+
+    async def inherit_option(self, option_path: str) -> str | None:
+        """Restore inheritance for an option in a detailed profile path."""
+        return await self.send_command(["InheritOption", option_path])
+
+    async def toggle(self, option: str) -> None:
+        """Toggle a supported temporary demo option."""
+        normalized = option.strip().casefold()
+        supported = {
+            member.value.decode("ascii").casefold(): member.value.decode("ascii")
+            for member in Toggle
+        }
+        if normalized not in supported:
+            raise ValueError(f"Unsupported toggle option: {option}")
+        await self.add_command_to_queue(["Toggle", supported[normalized]])
+
     ##########################
     # Helper Methods
     ##########################
     async def _construct_command(self, raw_command: list[str]) -> tuple[bytes, str]:
-        """
-        Transform commands into their byte values from the string value.
-
-        Handles both new format: ["KeyPress", "MENU"]
-        and old format: ["KeyPress, MENU"]
-        """
+        """Encode token lists or legacy comma-separated commands."""
         if not raw_command:
             raise NotImplementedError("Empty command")
 
         self.logger.debug("raw_command: %s -- length: %s", raw_command, len(raw_command))
 
-        # Handle comma-separated commands from HA: ["KeyPress, MENU"] -> ["KeyPress", "MENU"]
         if len(raw_command) == 1 and "," in raw_command[0]:
             parts = [part.strip() for part in raw_command[0].split(",")]
-            command_name = parts[0]
-            values = parts[1:] if len(parts) > 1 else []
-        elif len(raw_command) > 1:
-            # New format: ["KeyPress", "MENU"]
-            command_name = raw_command[0]
-            values = raw_command[1:]
         else:
-            # Single command: ["PowerOff"]
-            command_name = raw_command[0]
-            values = []
+            parts = raw_command
+        command_name, *values = parts
 
         self.logger.debug("Parsed command: %s, values: %s", command_name, values)
 
-        # Find the command in the Commands enum
-        for cmd_enum in Commands:
-            if hasattr(cmd_enum.value, "__len__") and len(cmd_enum.value) >= 3:
-                cmd_bytes, val_enum, _ = cmd_enum.value
+        if any(character in command_name for character in "\r\n\0"):
+            raise ValueError("Command names cannot contain control characters")
 
-                # Check if this matches our command name
-                if cmd_bytes.decode("utf-8", errors="ignore").rstrip() == command_name:
-                    # Build the command
-                    full_command = cmd_bytes
+        try:
+            cmd_bytes, val_enum, _ = Commands[command_name].value
+        except KeyError as err:
+            raise NotImplementedError(f"Command '{command_name}' not found") from err
 
-                    # Add parameters if any
-                    for value in values:
-                        if value.isnumeric():
-                            # Numeric parameter
-                            full_command += b" " + value.encode("utf-8")
-                        elif hasattr(val_enum, value) and hasattr(val_enum, "__members__"):
-                            # Enum value (like MENU for KeyPress)
-                            enum_value = getattr(val_enum, value).value
-                            if isinstance(enum_value, bytes):
-                                full_command += b" " + enum_value
-                            else:
-                                full_command += b" " + str(enum_value).encode("utf-8")
-                        else:
-                            # String parameter (wrap in quotes for commands like DisplayMessage)
-                            if command_name in ["DisplayMessage", "DisplayAudioVolume"]:
-                                if not (value.startswith('"') and value.endswith('"')):
-                                    value = f'"{value}"'
-                            full_command += b" " + value.encode("utf-8")
+        parameters = []
+        for index, value in enumerate(values):
+            if any(character in value for character in "\r\n\0"):
+                raise ValueError("Command parameters cannot contain control characters")
 
-                    # Add footer
-                    full_command += Footer.footer.value
+            member = getattr(val_enum, "__members__", {}).get(value)
+            if member is not None:
+                encoded_value = member.value if isinstance(member.value, bytes) else str(member.value).encode("utf-8")
+            else:
+                already_quoted = len(value) >= 2 and value.startswith('"') and value.endswith('"')
+                unquoted_value = value[1:-1] if already_quoted else value
+                if '"' in unquoted_value:
+                    raise ValueError("Embedded double quotes are not supported by the Envy protocol")
+                should_quote = index in _QUOTED_PARAMETERS.get(command_name, set()) or any(
+                    character.isspace() for character in unquoted_value
+                )
+                encoded_value = (
+                    f'"{unquoted_value}"' if should_quote or already_quoted else unquoted_value
+                ).encode("utf-8")
+            parameters.append(encoded_value)
 
-                    self.logger.debug("Constructed command: %s", full_command)
-                    return full_command, str(type(val_enum))
-
-        raise NotImplementedError(f"Command '{command_name}' not found")
+        full_command = b" ".join([cmd_bytes, *parameters]) + Footer.footer.value
+        self.logger.debug("Constructed command: %s", full_command)
+        return full_command, str(type(val_enum))
 
     # Legacy compatibility methods (simplified)
     async def is_device_connectable(self) -> bool:
