@@ -71,6 +71,38 @@ class TestCommandConstruction:
             assert cmd_bytes == expected, f"Failed for command {command}"
 
     @pytest.mark.asyncio
+    async def test_extended_protocol_commands(self, madvr):
+        """Test high-value protocol commands from the IP control reference."""
+        test_cases = [
+            (["KeyHold", "UP"], b"KeyHold UP\r\n"),
+            (["SetAspectRatioMode", "2.40:1"], b"SetAspectRatioMode 2.40:1\r\n"),
+            (
+                ["DisplayAlertWindow", "The movie is paused"],
+                b'DisplayAlertWindow "The movie is paused"\r\n',
+            ),
+            (["CloseAlertWindow"], b"CloseAlertWindow\r\n"),
+            (["EnumProfileGroups"], b"EnumProfileGroups\r\n"),
+            (["GetActiveProfile", "SOURCE"], b"GetActiveProfile SOURCE\r\n"),
+            (["EnumOptions", r"temporary\hdrSettings"], b"EnumOptions temporary\\hdrSettings\r\n"),
+            (["QueryOption", "hdrHighlightRecovery"], b"QueryOption hdrHighlightRecovery\r\n"),
+            (["ChangeOption", r"temporary\hdrNits", "121"], b"ChangeOption temporary\\hdrNits 121\r\n"),
+            (["InheritOption", r"temporary\hdrNits"], b"InheritOption temporary\\hdrNits\r\n"),
+        ]
+
+        for command, expected in test_cases:
+            cmd_bytes, _ = await madvr._construct_command(command)
+            assert cmd_bytes == expected, f"Failed for command {command}"
+
+    @pytest.mark.asyncio
+    async def test_protocol_injection_is_rejected(self, madvr):
+        """A parameter cannot inject a second protocol command."""
+        with pytest.raises(ValueError, match="control characters"):
+            await madvr._construct_command(["DisplayMessage", "3", "Hello\r\nPowerOff"])
+
+        with pytest.raises(ValueError, match="Embedded double quotes"):
+            await madvr._construct_command(["DisplayMessage", "3", 'Hello "there"'])
+
+    @pytest.mark.asyncio
     async def test_numeric_parameters(self, madvr):
         """Test commands with numeric parameters."""
         test_cases = [

@@ -74,6 +74,20 @@ class KeyPress(Enum):
     POWER = b"POWER"
 
 
+class AspectRatioMode(Enum):
+    Auto = b"Auto"
+    Hold = b"Hold"
+    _4_3 = b"4:3"
+    _16_9 = b"16:9"
+    _1_85_1 = b"1.85:1"
+    _2_00_1 = b"2.00:1"
+    _2_20_1 = b"2.20:1"
+    _2_35_1 = b"2.35:1"
+    _2_40_1 = b"2.40:1"
+    _2_55_1 = b"2.55:1"
+    _2_76_1 = b"2.76:1"
+
+
 class DisplayAlert(Enum):
     pass
 
@@ -91,6 +105,12 @@ class DisplayAudioVolume(Enum):
 
 
 class Information(Enum):
+    pass
+
+
+class Parameters(Enum):
+    """Marker for commands accepting protocol-defined free-form parameters."""
+
     pass
 
 
@@ -149,6 +169,9 @@ class Commands(Enum):
     CloseMenu = b"CloseMenu", SingleCmd, IsInformational.false
     KeyPress = b"KeyPress", KeyPress, IsInformational.false
     KeyHold = b"KeyHold", KeyPress, IsInformational.false
+    DisplayAlertWindow = b"DisplayAlertWindow", Parameters, IsInformational.false
+    CloseAlertWindow = b"CloseAlertWindow", SingleCmd, IsInformational.false
+    SetAspectRatioMode = b"SetAspectRatioMode", AspectRatioMode, IsInformational.false
 
     GetIncomingSignalInfo = b"GetIncomingSignalInfo", SignalInfo, IsInformational.true
     GetOutgoingSignalInfo = (
@@ -160,6 +183,24 @@ class Commands(Enum):
     GetMaskingRatio = b"GetMaskingRatio", SingleCmd, IsInformational.true
     GetTemperatures = b"GetTemperatures", Temperatures, IsInformational.true
     GetMacAddress = b"GetMacAddress", SingleCmd, IsInformational.true
+
+    # Profiles and options
+    CreateProfileGroup = b"CreateProfileGroup", Parameters, IsInformational.false
+    RenameProfileGroup = b"RenameProfileGroup", Parameters, IsInformational.false
+    EnumProfileGroups = b"EnumProfileGroups", SingleCmd, IsInformational.true
+    CreateProfile = b"CreateProfile", Parameters, IsInformational.false
+    RenameProfile = b"RenameProfile", Parameters, IsInformational.false
+    AddProfileToPage = b"AddProfileToPage", Parameters, IsInformational.false
+    RemoveProfileFromPage = b"RemoveProfileFromPage", Parameters, IsInformational.false
+    GetActiveProfile = b"GetActiveProfile", Parameters, IsInformational.true
+    EnumProfiles = b"EnumProfiles", Parameters, IsInformational.true
+
+    EnumSettingPages = b"EnumSettingPages", SingleCmd, IsInformational.true
+    EnumConfigPages = b"EnumConfigPages", SingleCmd, IsInformational.true
+    EnumOptions = b"EnumOptions", Parameters, IsInformational.true
+    QueryOption = b"QueryOption", Parameters, IsInformational.true
+    ChangeOption = b"ChangeOption", Parameters, IsInformational.false
+    InheritOption = b"InheritOption", Parameters, IsInformational.false
 
     Toggle = b"Toggle", Toggle, IsInformational.false
     ToneMapOn = b"ToneMapOn", SingleCmd, IsInformational.false

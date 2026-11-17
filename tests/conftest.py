@@ -21,7 +21,10 @@ def mock_madvr():
 
         # Mock notification connection components
         madvr.notification_reader = AsyncMock()
-        madvr.notification_writer = AsyncMock()
+        # StreamWriter.close() is synchronous; drain()/wait_closed() are async.
+        madvr.notification_writer = MagicMock()
+        madvr.notification_writer.drain = AsyncMock()
+        madvr.notification_writer.wait_closed = AsyncMock()
         madvr.notification_task = MagicMock()
         madvr.ping_task = MagicMock()
         madvr.refresh_task = MagicMock()

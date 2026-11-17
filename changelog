@@ -1,1 +1,13 @@
+# 2.0.0b1
+
+- Add key press/hold, menu, alert, aspect-ratio, profile, and option helpers.
+- Add profile/page enumeration and option query/change/inherit commands.
+- Quote text parameters and reject command-injection characters.
+- Validate message durations and volume ranges.
+- Declare Python >=3.11; skip PyPI publication for GitHub prereleases.
+
+Breaking changes: unsupported Python versions are rejected during installation;
+invalid command text, negative durations, and out-of-range volume values raise
+ValueError. KeyHold is one long-press event, not continuous navigation.
+
 # 1.0.0
