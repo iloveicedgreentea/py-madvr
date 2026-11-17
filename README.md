@@ -51,6 +51,10 @@ membership commands; settings/configuration page enumeration; and option
 enumeration. File transfers, calibration deletion, and password-bearing settings
 commands are not included.
 
+Enumeration commands use a separate connection and return the complete rows plus
+their terminating marker, excluding unrelated notifications. Responses have a
+1 MiB limit and use the library's command-response timeout (0.5 seconds).
+
 `KeyHold` sends one Envy long-press event. It does not repeat navigation while
 a button stays down. A dashboard must send repeated `KeyPress` commands for
 that behavior. Physical Envy hold behavior has not been verified for this beta.

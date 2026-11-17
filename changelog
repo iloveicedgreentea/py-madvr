@@ -2,6 +2,7 @@
 
 - Add key press/hold, menu, alert, aspect-ratio, profile, and option helpers.
 - Add profile/page enumeration and option query/change/inherit commands.
+- Read complete enumeration replies on separate connections.
 - Quote text parameters and reject command-injection characters.
 - Validate message durations and volume ranges.
 - Declare Python >=3.11; skip PyPI publication for GitHub prereleases.

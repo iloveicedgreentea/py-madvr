@@ -33,6 +33,43 @@ _QUOTED_PARAMETERS = {
     "RenameProfile": {2},
     "RenameProfileGroup": {1},
 }
+_ENUMERATION_TERMINATORS = {
+    b"EnumProfileGroups": b"ProfileGroup.",
+    b"EnumProfiles": b"Profile.",
+    b"EnumOptions": b"Option.",
+    b"EnumSettingPages": b"SettingPage.",
+    b"EnumConfigPages": b"ConfigPage.",
+}
+_MAX_ENUMERATION_BYTES = 1024 * 1024
+
+
+async def _read_enumeration_response(reader: asyncio.StreamReader, terminator: bytes) -> str:
+    """Read enumeration rows while ignoring interleaved acknowledgements/notifications."""
+    prefix = terminator[:-1] + b" "
+    rows = []
+    line = bytearray()
+    size = 0
+    async with asyncio.timeout(COMMAND_RESPONSE_TIMEOUT):
+        while True:
+            character = await reader.read(1)
+            if not character:
+                raise ConnectionError("Enumeration ended before its terminator")
+            size += 1
+            if size > _MAX_ENUMERATION_BYTES:
+                raise ConnectionError("Enumeration response exceeds 1 MiB")
+            if character not in (b"\r", b"\n"):
+                line.extend(character)
+                continue
+
+            value = bytes(line).strip()
+            line.clear()
+            if value == b"ERROR" or value.startswith(b"ERROR "):
+                return value.decode("utf-8", errors="replace")
+            if value == terminator:
+                rows.append(value)
+                return b"\n".join(rows).decode("utf-8", errors="replace")
+            if value.startswith(prefix):
+                rows.append(value)
 
 
 class Madvr:
@@ -386,7 +423,7 @@ class Madvr:
 
         Args:
             command: A list containing the command to send.
-            direct: If True, use direct connection. If False, use connection pool.
+            direct: If True, use a direct connection. Enumerations always use one.
 
         Returns:
             Response from the device or None
@@ -404,8 +441,8 @@ class Madvr:
         self.logger.debug("Sending command: %s", cmd)
 
         try:
-            if direct:
-                # Use bespoke connection
+            if direct or cmd.split(maxsplit=1)[0] in _ENUMERATION_TERMINATORS:
+                # Enumeration replies can span many reads; isolate their trailing notifications.
                 response = await self._send_command_direct(cmd)
             else:
                 # Use connection pool
@@ -418,6 +455,7 @@ class Madvr:
     async def _send_command_direct(self, cmd: bytes) -> str | None:
         """Send a command using a direct connection - no pooling."""
         writer = None
+        terminator = _ENUMERATION_TERMINATORS.get(cmd.split(maxsplit=1)[0])
         try:
             deadline = asyncio.get_event_loop().time() + CONNECTION_TIMEOUT
             async with asyncio.timeout_at(deadline):
@@ -425,13 +463,27 @@ class Madvr:
 
             deadline = asyncio.get_event_loop().time() + COMMAND_RESPONSE_TIMEOUT
             async with asyncio.timeout_at(deadline):
-                welcome = await reader.read(1024)
+                if terminator is None:
+                    welcome = await reader.read(1024)
+                else:
+                    welcome_buffer = bytearray()
+                    while True:
+                        character = await reader.read(1)
+                        if not character or character in (b"\r", b"\n"):
+                            break
+                        welcome_buffer.extend(character)
+                        if len(welcome_buffer) > _MAX_ENUMERATION_BYTES:
+                            raise ConnectionError("Welcome message exceeds 1 MiB")
+                    welcome = bytes(welcome_buffer)
 
             if b"WELCOME" not in welcome:
                 raise ConnectionError("Did not receive welcome message")
 
             writer.write(cmd)
             await writer.drain()
+
+            if terminator is not None:
+                return await _read_enumeration_response(reader, terminator)
 
             deadline = asyncio.get_event_loop().time() + COMMAND_RESPONSE_TIMEOUT
             async with asyncio.timeout_at(deadline):
